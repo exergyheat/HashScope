@@ -50,13 +50,20 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession }: Se
               </div>
             )}
 
-            {/* Peer IP:Port */}
+            {/* Peer IP:Port and Message Count */}
             <div className="flex items-center justify-between mb-1">
               <span className="font-mono text-xs opacity-90">
                 {session.peer}
               </span>
               <Badge variant="secondary">{session.message_count}</Badge>
             </div>
+
+            {/* Difficulty (if available) */}
+            {session.difficulty !== null && session.difficulty !== undefined && (
+              <div className="text-xs opacity-90 mb-1 font-medium">
+                Difficulty: {session.difficulty.toLocaleString()}
+              </div>
+            )}
 
             {/* Mining Session ID (if available) */}
             {session.mining_session_id && (

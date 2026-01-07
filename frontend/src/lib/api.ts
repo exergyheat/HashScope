@@ -30,6 +30,7 @@ export interface Session {
   message_count: number;
   user_agent?: string | null;
   mining_session_id?: string | null;
+  difficulty?: number | null;
   stats?: {
     total_messages: number;
     miner_to_pool: number;

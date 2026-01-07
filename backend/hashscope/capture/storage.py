@@ -124,6 +124,7 @@ class CaptureStorage:
                     "message_count": 0,
                     "user_agent": None,
                     "mining_session_id": None,
+                    "difficulty": None,
                 }
 
             metadata = self._session_metadata[message.session_id]
@@ -144,6 +145,16 @@ class CaptureStorage:
                     # Second param (if present) is mining session ID for reconnection
                     if len(params) > 1 and params[1] and not metadata.get("mining_session_id"):
                         metadata["mining_session_id"] = params[1]
+
+            # Extract difficulty from mining.set_difficulty (sent by pool)
+            if (message.decoded and
+                message.decoded.get("method") == "mining.set_difficulty" and
+                message.decoded.get("params")):
+                params = message.decoded["params"]
+                if isinstance(params, list) and len(params) > 0:
+                    # First param is the difficulty value
+                    metadata["difficulty"] = params[0]
+                    logger.debug(f"Updated difficulty for session {message.session_id}: {params[0]}")
 
         # Notify subscribers (outside lock to avoid blocking)
         if should_notify:
