@@ -1,0 +1,21 @@
+# Backend
+backend/__pycache__
+backend/**/__pycache__
+backend/*.pyc
+backend/**/*.pyc
+backend/.pytest_cache
+backend/tests
+
+# Frontend
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# General
+.git
+.gitignore
+*.md
+.env
+.env.*
+docker-compose.yml
+

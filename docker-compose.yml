@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hashscope-backend
+    ports:
+      - "3333:3333"  # Proxy port for miners
+      - "8000:8000"  # API port
+    environment:
+      - LISTEN_HOST=0.0.0.0
+      - LISTEN_PORT=3333
+      - POOL_HOST=${POOL_HOST:-stratum+tcp://pool.example.com}
+      - POOL_PORT=${POOL_PORT:-3333}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - CAPTURE_MAX_MESSAGES=50000
+      - CAPTURE_MAX_PER_SESSION=10000
+    restart: unless-stopped
+    networks:
+      - hashscope
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: hashscope-frontend
+    ports:
+      - "3000:80"  # Web UI port
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - hashscope
+
+networks:
+  hashscope:
+    driver: bridge
+
