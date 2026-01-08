@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "default": {
+      "format": "%(levelname)s:\t%(name)s - %(message)s"
+    }
+  },
+  "handlers": {
+    "default": {
+      "formatter": "default",
+      "class": "logging.StreamHandler",
+      "stream": "ext://sys.stdout"
+    }
+  },
+  "root": {
+    "level": "INFO",
+    "handlers": ["default"]
+  },
+  "loggers": {
+    "hashscope": {
+      "level": "INFO",
+      "handlers": ["default"],
+      "propagate": false
+    },
+    "uvicorn": {
+      "level": "INFO",
+      "handlers": ["default"],
+      "propagate": false
+    }
+  }
+}
+

@@ -45,6 +45,10 @@ class CaptureStorage:
         # Subscribers for real-time updates
         self._subscribers: list[Callable[[CapturedMessage], Awaitable[None]]] = []
 
+        # Session broadcast control (Iteration 2)
+        self._session_broadcast_enabled: dict[str, bool] = {}
+        self._session_repeat_count: dict[str, int] = {}  # Number of times to repeat each share
+
     async def add_message(self, message: CapturedMessage) -> None:
         """
         Add a captured message to storage.
@@ -221,7 +225,14 @@ class CaptureStorage:
             List of session metadata dicts
         """
         async with self._lock:
-            return list(self._session_metadata.values())
+            sessions = []
+            for session_id, metadata in self._session_metadata.items():
+                session_data = metadata.copy()
+                # Add broadcast status
+                session_data["broadcast_enabled"] = self._session_broadcast_enabled.get(session_id, False)
+                session_data["repeat_count"] = self._session_repeat_count.get(session_id, 1)
+                sessions.append(session_data)
+            return sessions
 
     async def get_session_stats(self, session_id: str) -> Optional[dict]:
         """
@@ -288,4 +299,68 @@ class CaptureStorage:
             self._messages.clear()
             self._session_messages.clear()
             self._session_metadata.clear()
+
+    # Session broadcast control methods (Iteration 2)
+
+    async def enable_session_broadcast(self, session_id: str) -> None:
+        """
+        Enable ShareEvent publishing for a session.
+
+        Args:
+            session_id: The session ID to enable
+        """
+        async with self._lock:
+            self._session_broadcast_enabled[session_id] = True
+            logger.info(f"Enabled broadcast for session {session_id}")
+
+    async def disable_session_broadcast(self, session_id: str) -> None:
+        """
+        Disable ShareEvent publishing for a session.
+
+        Args:
+            session_id: The session ID to disable
+        """
+        async with self._lock:
+            self._session_broadcast_enabled[session_id] = False
+            logger.info(f"Disabled broadcast for session {session_id}")
+
+    async def is_session_broadcast_enabled(self, session_id: str) -> bool:
+        """
+        Check if ShareEvent publishing is enabled for a session.
+
+        Args:
+            session_id: The session ID to check
+
+        Returns:
+            True if broadcast is enabled, False otherwise (default)
+        """
+        async with self._lock:
+            return self._session_broadcast_enabled.get(session_id, False)
+
+    async def set_session_repeat_count(self, session_id: str, repeat_count: int) -> None:
+        """
+        Set the repeat count for a session (load testing feature).
+
+        Args:
+            session_id: The session ID
+            repeat_count: Number of times to repeat each share (1-1000)
+        """
+        # Clamp to reasonable bounds
+        repeat_count = max(1, min(repeat_count, 1000))
+        async with self._lock:
+            self._session_repeat_count[session_id] = repeat_count
+            logger.info(f"Set repeat count for session {session_id} to {repeat_count}")
+
+    async def get_session_repeat_count(self, session_id: str) -> int:
+        """
+        Get the repeat count for a session.
+
+        Args:
+            session_id: The session ID
+
+        Returns:
+            Repeat count (default 1)
+        """
+        async with self._lock:
+            return self._session_repeat_count.get(session_id, 1)
 

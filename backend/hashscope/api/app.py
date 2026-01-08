@@ -11,7 +11,7 @@ from ..capture.storage import CaptureStorage
 from ..config.settings import Settings, get_settings
 from ..proxy.server import ProxyServer
 from . import dependencies
-from .routes import messages, sessions, websocket
+from .routes import messages, sessions, websocket, agents
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,10 @@ async def lifespan(app: FastAPI):
 
     # Start proxy server in background
     proxy_server = ProxyServer(settings, storage)
+
+    # Initialize telemetry storage (Iteration 2)
+    dependencies.init_telemetry_storage(proxy_server.telemetry_storage)
+
     proxy_task = asyncio.create_task(proxy_server.start())
 
     logger.info("Application started")
@@ -78,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(messages.router, prefix="/api", tags=["messages"])
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
     app.include_router(websocket.router, prefix="/api", tags=["websocket"])
+    app.include_router(agents.router, prefix="/api", tags=["agents"])
 
     @app.get("/")
     async def root():

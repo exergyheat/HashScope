@@ -4,6 +4,7 @@ import { SessionList } from './components/SessionList';
 import { MessageFilters } from './components/MessageFilters';
 import { MessageTable } from './components/MessageTable';
 import { MessageDetail } from './components/MessageDetail';
+import { AgentStatus } from './components/AgentStatus';
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 
 function App() {
@@ -25,16 +26,16 @@ function App() {
   const [newMessageIds, setNewMessageIds] = useState<Set<string>>(new Set());
 
   // Load sessions
-  useEffect(() => {
-    const loadSessions = async () => {
-      try {
-        const data = await api.getSessions();
-        setSessions(data);
-      } catch (error) {
-        console.error('Failed to load sessions:', error);
-      }
-    };
+  const loadSessions = async () => {
+    try {
+      const data = await api.getSessions();
+      setSessions(data);
+    } catch (error) {
+      console.error('Failed to load sessions:', error);
+    }
+  };
 
+  useEffect(() => {
     loadSessions();
     const interval = setInterval(loadSessions, 5000); // Refresh every 5s
 
@@ -210,12 +211,14 @@ function App() {
       <main className="container mx-auto px-4 py-6">
         <div className="grid grid-cols-12 gap-6">
           {/* Sessions sidebar */}
-          <div className="col-span-3">
+          <div className="col-span-3 space-y-6">
             <SessionList
               sessions={sessions}
               selectedSessionId={selectedSessionId}
               onSelectSession={setSelectedSessionId}
+              onSessionUpdate={loadSessions}
             />
+            <AgentStatus />
           </div>
 
           {/* Main content */}

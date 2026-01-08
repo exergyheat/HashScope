@@ -31,11 +31,32 @@ export interface Session {
   user_agent?: string | null;
   mining_session_id?: string | null;
   difficulty?: number | null;
+  broadcast_enabled?: boolean;
+  repeat_count?: number;
   stats?: {
     total_messages: number;
     miner_to_pool: number;
     pool_to_miner: number;
     parse_errors: number;
+  };
+}
+
+export interface Agent {
+  agent_id: string;
+  last_seen: string;
+  conn_state: 'connected' | 'reconnecting' | 'error';
+  stats: {
+    share_events_received_total: number;
+    submits_attempted_total: number;
+    submits_accepted_total: number;
+    submits_rejected_total: number;
+    last_submit_latency_ms: number | null;
+    submits_per_second_1min: number | null;
+    submits_per_second_10sec: number | null;
+  };
+  pool_target: {
+    host: string;
+    port: number;
   };
 }
 
@@ -97,6 +118,88 @@ export class HashScopeAPI {
 
     ws.onerror = (error) => {
       console.error('WebSocket error:', error);
+    };
+
+    return ws;
+  }
+
+  // Session broadcast control (Iteration 2)
+  async enableSessionBroadcast(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/broadcast/enable`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to enable broadcast');
+    }
+  }
+
+  async disableSessionBroadcast(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/broadcast/disable`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to disable broadcast');
+    }
+  }
+
+  async getSessionBroadcastStatus(sessionId: string): Promise<{ broadcast_enabled: boolean }> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/broadcast/status`);
+    if (!response.ok) {
+      throw new Error('Failed to get broadcast status');
+    }
+    return response.json();
+  }
+
+  async setSessionRepeatCount(sessionId: string, repeatCount: number): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/repeat-count`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ repeat_count: repeatCount }),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to set repeat count');
+    }
+  }
+
+  async getSessionRepeatCount(sessionId: string): Promise<{ repeat_count: number }> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/repeat-count`);
+    if (!response.ok) {
+      throw new Error('Failed to get repeat count');
+    }
+    return response.json();
+  }
+
+  // Agent telemetry (Iteration 2)
+  async getAgents(): Promise<Agent[]> {
+    const response = await fetch(`${API_BASE}/agents`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch agents');
+    }
+    return response.json();
+  }
+
+  async getAgent(agentId: string): Promise<any> {
+    const response = await fetch(`${API_BASE}/agents/${agentId}`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch agent');
+    }
+    return response.json();
+  }
+
+  connectAgentsWebSocket(onMessage: (data: any) => void): WebSocket {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const ws = new WebSocket(`${protocol}//${host}${API_BASE}/ws/agents`);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      onMessage(data);
+    };
+
+    ws.onerror = (error) => {
+      console.error('Agents WebSocket error:', error);
     };
 
     return ws;

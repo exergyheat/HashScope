@@ -1,6 +1,7 @@
 """Proxy session handling."""
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -9,6 +10,19 @@ from typing import Optional
 from ..capture.models import CapturedMessage, MessageDirection
 from ..capture.storage import CaptureStorage
 from ..stratum.parser import StratumParser
+from ..nostr.client import NostrClient
+from ..nostr.schemas import ShareEvent, PoolInfo, StratumData
+from ..nostr.constants import (
+    KIND_SHARE_EVENT,
+    TAG_KEY_T,
+    TAG_KEY_RUN,
+    TAG_KEY_TYPE,
+    TAG_KEY_SCHEMA,
+    TAG_HASHSCOPE,
+    TAG_SCHEMA,
+    TAG_TYPE_SHARE,
+)
+from ..config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +38,8 @@ class ProxySession:
         pool_port: int,
         storage: CaptureStorage,
         session_id: Optional[str] = None,
+        nostr_client: Optional[NostrClient] = None,
+        settings: Optional[Settings] = None,
     ):
         """
         Initialize a proxy session.
@@ -35,6 +51,8 @@ class ProxySession:
             pool_port: Upstream pool port
             storage: Capture storage instance
             session_id: Optional session ID (generated if not provided)
+            nostr_client: Optional Nostr client for publishing ShareEvents
+            settings: Optional settings instance
         """
         self.session_id = session_id or str(uuid.uuid4())
         self.miner_reader = miner_reader
@@ -43,6 +61,8 @@ class ProxySession:
         self.pool_port = pool_port
         self.storage = storage
         self.parser = StratumParser()
+        self.nostr_client = nostr_client
+        self.settings = settings
 
         # Get peer info
         peer_info = miner_writer.get_extra_info('peername')
@@ -55,6 +75,9 @@ class ProxySession:
 
         self._message_counter = 0
         self._running = False
+
+        # ShareEvent sequence counter (Iteration 2)
+        self._share_event_seq = 0
 
         logger.info(f"Session {self.session_id} created for miner {self.miner_peer}")
 
@@ -109,6 +132,12 @@ class ProxySession:
                     ts_recv=ts_recv,
                     parsed=parsed,
                 )
+
+                # Publish ShareEvent to Nostr if enabled (Iteration 2)
+                if parsed.success and parsed.message:
+                    asyncio.create_task(
+                        self._maybe_publish_share_event(parsed.message, ts_recv)
+                    )
 
                 # Forward to pool (byte-for-byte relay)
                 if self.pool_writer:
@@ -208,6 +237,91 @@ class ProxySession:
         )
 
         await self.storage.add_message(captured)
+
+    async def _maybe_publish_share_event(
+        self,
+        message,
+        ts_recv: datetime,
+    ) -> None:
+        """
+        Publish ShareEvent to Nostr if conditions are met.
+
+        Conditions:
+        - Nostr is enabled in settings
+        - Nostr client is available and connected
+        - Broadcast is enabled for this session
+        - Message is a mining.submit
+
+        Args:
+            message: Parsed Stratum message
+            ts_recv: Timestamp when message was received
+        """
+        try:
+            # Check if Nostr is enabled
+            if not self.settings or not self.settings.nostr_enabled:
+                return
+
+            # Check if Nostr client is available
+            if not self.nostr_client or not self.nostr_client.connected:
+                return
+
+            # Check if broadcast is enabled for this session
+            if not await self.storage.is_session_broadcast_enabled(self.session_id):
+                return
+
+            # Check if this is a mining.submit message
+            if message.method != "mining.submit":
+                return
+
+            # Increment sequence number
+            self._share_event_seq += 1
+
+            # Get repeat count for this session
+            repeat_count = await self.storage.get_session_repeat_count(self.session_id)
+
+            # Create ShareEvent
+            share_event = ShareEvent(
+                run_id=self.settings.run_id,
+                event_id=str(uuid.uuid4()),
+                seq=self._share_event_seq,
+                ts=ts_recv.isoformat() + "Z",
+                pool=PoolInfo(host=self.pool_host, port=self.pool_port),
+                stratum=StratumData(
+                    method=message.method,
+                    id=message.id,
+                    params=message.params or [],
+                ),
+                repeat_count=repeat_count,
+                context={
+                    "session_id": self.session_id,
+                    "miner_peer": self.miner_peer,
+                },
+            )
+
+            # Publish to Nostr
+            tags = [
+                [TAG_KEY_T, TAG_HASHSCOPE],
+                [TAG_KEY_RUN, self.settings.run_id],
+                [TAG_KEY_TYPE, TAG_TYPE_SHARE],
+                [TAG_KEY_SCHEMA, TAG_SCHEMA],
+            ]
+
+            content = share_event.model_dump_json()
+
+            await self.nostr_client.publish_event(
+                kind=self.settings.nostr_kind_share,
+                content=content,
+                tags=tags,
+            )
+
+            logger.debug(
+                f"Published ShareEvent seq={self._share_event_seq} "
+                f"for session {self.session_id}"
+            )
+
+        except Exception as e:
+            # Never let publishing errors affect relaying
+            logger.error(f"Error publishing ShareEvent: {e}", exc_info=True)
 
     async def _cleanup(self) -> None:
         """Clean up connections."""

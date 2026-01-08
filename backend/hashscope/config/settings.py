@@ -1,8 +1,10 @@
 """Application settings using Pydantic."""
 
+import uuid
 from functools import lru_cache
 from typing import Optional
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +33,15 @@ class Settings(BaseSettings):
 
     # CORS settings
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
+
+    # Nostr settings (Iteration 2)
+    run_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    nostr_relay_url: Optional[str] = None  # e.g., wss://relay.damus.io
+    nostr_relay_url_secondary: Optional[str] = None
+    nostr_sk: Optional[str] = None  # Hex-encoded secret key (auto-generated if not provided)
+    nostr_kind_share: int = 30080
+    nostr_kind_telemetry: int = 30079
+    nostr_enabled: bool = False  # Feature flag
 
     def get_pool_hostname(self) -> str:
         """

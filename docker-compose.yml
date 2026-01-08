@@ -4,18 +4,11 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: hashscope-backend
+    env_file:
+      - .env
     ports:
       - "3333:3333"  # Proxy port for miners
       - "8000:8000"  # API port
-    environment:
-      - LISTEN_HOST=0.0.0.0
-      - LISTEN_PORT=3333
-      - POOL_HOST=${POOL_HOST:-stratum+tcp://pool.example.com}
-      - POOL_PORT=${POOL_PORT:-3333}
-      - API_HOST=0.0.0.0
-      - API_PORT=8000
-      - CAPTURE_MAX_MESSAGES=50000
-      - CAPTURE_MAX_PER_SESSION=10000
     restart: unless-stopped
     networks:
       - hashscope
@@ -25,6 +18,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: hashscope-frontend
+    env_file:
+      - .env
     ports:
       - "3000:80"  # Web UI port
     depends_on:
@@ -32,6 +27,24 @@ services:
     restart: unless-stopped
     networks:
       - hashscope
+
+  # Agent service (Iteration 2)
+  # Scale with: docker compose up -d --scale agent=3
+  agent:
+    build:
+      context: ./agents
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - hashscope
+    depends_on:
+      - backend
+    # By default, no agents run
+    # Use --scale agent=N to run N agents
+    deploy:
+      replicas: 0
 
 networks:
   hashscope:
