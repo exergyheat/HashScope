@@ -1,7 +1,7 @@
 site_name: HashScope Documentation
 site_description: Bitcoin Mining MITM Proxy - Capture, decode, and visualize Stratum protocol messages
 site_author: 256 Foundation
-site_url: http://localhost:3000/docs/
+site_url: https://256foundation.github.io/HashScope/
 use_directory_urls: true
 repo_url: https://github.com/256foundation/HashScope
 repo_name: 256foundation/HashScope
