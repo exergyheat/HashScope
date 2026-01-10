@@ -121,7 +121,9 @@ Open an issue for any questions about contributing!
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project.
+By contributing, you agree that your contributions will be licensed under the same license as the project (MIT License).
+
+This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
 
 Copyright © 2024 256 Foundation
 
