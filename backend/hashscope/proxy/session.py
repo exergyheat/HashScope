@@ -79,10 +79,149 @@ class ProxySession:
         # ShareEvent sequence counter (Iteration 2)
         self._share_event_seq = 0
 
+        # Replay response tracking
+        self._replay_futures: dict[int | str, asyncio.Future] = {}
+
         logger.info(f"Session {self.session_id} created for miner {self.miner_peer}")
+
+    async def replay_message(self, message_data: str) -> tuple[Optional[dict], float]:
+        """
+        Replay a message through the existing pool connection for debugging.
+
+        The message is sent to the pool, and the response is intercepted by
+        the relay task instead of being forwarded to the miner.
+
+        Args:
+            message_data: The JSON message to send (should be a complete line)
+
+        Returns:
+            Tuple of (response_dict, latency_ms)
+        """
+        if not self.pool_writer or not self.pool_reader:
+            raise RuntimeError("Pool connection not established")
+
+        import time
+
+        # Parse message to get the ID
+        try:
+            message_dict = json.loads(message_data)
+            message_id = message_dict.get("id")
+            if message_id is None:
+                raise ValueError("Message must have an 'id' field")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(f"Invalid message format: {e}")
+
+        # Create a future for this replay
+        future = asyncio.Future()
+        self._replay_futures[message_id] = future
+
+        try:
+            # Ensure message ends with newline
+            if not message_data.endswith("\n"):
+                message_data += "\n"
+
+            # Send the message
+            start_time = time.time()
+            self.pool_writer.write(message_data.encode())
+            await self.pool_writer.drain()
+
+            # Wait for the response (intercepted by relay task)
+            response_dict = await asyncio.wait_for(future, timeout=10.0)
+
+            end_time = time.time()
+            latency_ms = (end_time - start_time) * 1000
+
+            return response_dict, latency_ms
+
+        except asyncio.TimeoutError:
+            # Clean up the future on timeout
+            self._replay_futures.pop(message_id, None)
+            raise
+        except Exception:
+            # Clean up the future on error
+            self._replay_futures.pop(message_id, None)
+            raise
+
+    async def capture_replay_message(
+        self,
+        request_data: str,
+        response_dict: dict,
+        latency_ms: float,
+        replay_index: int = 0
+    ) -> str:
+        """
+        Capture a replay message for the message list.
+
+        This creates a message with direction HASHSCOPE_TO_POOL showing
+        the replayed request and its response.
+
+        Args:
+            request_data: The JSON request string that was replayed
+            response_dict: The response from the pool
+            latency_ms: The response latency
+            replay_index: Index for auto-replay sequences (default 0)
+
+        Returns:
+            The message ID
+        """
+        from datetime import datetime
+
+        ts_recv = datetime.utcnow()
+        ts_fwd = datetime.utcnow()
+
+        # Parse the request
+        try:
+            request_dict = json.loads(request_data)
+        except json.JSONDecodeError:
+            request_dict = {}
+
+        # Create a unique message ID for the replay
+        # Use UUID to ensure absolute uniqueness, especially for auto-replay sequences
+        unique_id = str(uuid.uuid4())
+        message_id = f"{self.session_id}-replay-{request_dict.get('id', 'unknown')}-{unique_id}"
+
+        # Encode raw data
+        import base64
+        raw_request = base64.b64encode(request_data.encode()).decode()
+
+        captured_message = CapturedMessage(
+            id=message_id,
+            ts_recv=ts_recv,
+            ts_fwd=ts_fwd,
+            direction=MessageDirection.HASHSCOPE_TO_POOL,
+            session_id=self.session_id,
+            peer=f"hashscope→{self.pool_peer or 'pool'}",
+            raw=raw_request,
+            decoded=request_dict,
+            parse_error=None,
+            size_bytes=len(request_data.encode()),
+            jsonrpc_id=request_dict.get('id'),
+            is_request=True,
+            is_response=False,
+            response=response_dict,
+            response_ts_recv=ts_fwd,
+            latency_ms=latency_ms,
+        )
+
+        # Store in capture storage WITH WebSocket notification
+        # Since we're using UUIDs for message IDs, duplicates won't happen
+        # WebSocket broadcast allows UI to see auto-replays in real-time
+        logger.info(f"Storing replay message {message_id} (notify=True)")
+        await self.storage.add_message(captured_message, notify=True)
+        logger.info(f"Replay message {message_id} stored successfully")
+
+        return message_id
 
     async def start(self) -> None:
         """Start the proxy session."""
+        # Register session with storage (before pool connection attempt)
+        await self.storage.register_session(
+            session_id=self.session_id,
+            peer=self.miner_peer,
+            pool_host=self.pool_host,
+            pool_port=self.pool_port,
+        )
+
         try:
             # Connect to upstream pool
             self.pool_reader, self.pool_writer = await asyncio.open_connection(
@@ -91,6 +230,13 @@ class ProxySession:
 
             peer_info = self.pool_writer.get_extra_info('peername')
             self.pool_peer = f"{peer_info[0]}:{peer_info[1]}" if peer_info else "unknown"
+
+            # Update pool connection status
+            await self.storage.update_session_pool_status(
+                session_id=self.session_id,
+                connected=True,
+                pool_peer=self.pool_peer,
+            )
 
             logger.info(
                 f"Session {self.session_id}: Connected to pool {self.pool_host}:{self.pool_port}"
@@ -107,6 +253,11 @@ class ProxySession:
 
         except Exception as e:
             logger.error(f"Session {self.session_id} error: {e}", exc_info=True)
+            # Update pool connection status to failed
+            await self.storage.update_session_pool_status(
+                session_id=self.session_id,
+                connected=False,
+            )
         finally:
             await self._cleanup()
 
@@ -144,6 +295,12 @@ class ProxySession:
                     self.pool_writer.write(data)
                     await self.pool_writer.drain()
 
+                # Auto-replay if enabled (load testing)
+                if parsed.success and parsed.message and parsed.message.method == "mining.submit":
+                    asyncio.create_task(
+                        self._maybe_auto_replay(parsed.message, data.decode())
+                    )
+
         except asyncio.IncompleteReadError:
             logger.info(f"Session {self.session_id}: Miner disconnected")
         except Exception as e:
@@ -166,17 +323,39 @@ class ProxySession:
                 # Parse the message
                 parsed = self.parser.parse(data)
 
-                # Capture the message
-                await self._capture_message(
-                    data=data,
-                    direction=MessageDirection.POOL_TO_MINER,
-                    ts_recv=ts_recv,
-                    parsed=parsed,
-                )
+                # Check if this is a response to a replay request
+                is_replay_response = False
+                if parsed.success and parsed.message:
+                    message_id = parsed.message.id
+                    if message_id is not None and message_id in self._replay_futures:
+                        # This is a replay response - complete the future
+                        future = self._replay_futures.pop(message_id)
+                        if not future.done():
+                            # Serialize the StratumMessage to dict
+                            if hasattr(parsed.message, 'model_dump'):
+                                result = parsed.message.model_dump()
+                            elif hasattr(parsed.message, 'dict'):
+                                result = parsed.message.dict()
+                            else:
+                                result = vars(parsed.message)
+                            future.set_result(result)
+                        is_replay_response = True
+                        logger.info(f"Session {self.session_id}: Intercepted replay response for message ID {message_id} (not forwarding to miner)")
 
-                # Forward to miner (byte-for-byte relay)
-                self.miner_writer.write(data)
-                await self.miner_writer.drain()
+                # Capture the message ONLY if not a replay response
+                # Replay messages are captured separately with HASHSCOPE_TO_POOL direction
+                if not is_replay_response:
+                    await self._capture_message(
+                        data=data,
+                        direction=MessageDirection.POOL_TO_MINER,
+                        ts_recv=ts_recv,
+                        parsed=parsed,
+                    )
+
+                # Forward to miner ONLY if not a replay response
+                if not is_replay_response:
+                    self.miner_writer.write(data)
+                    await self.miner_writer.drain()
 
         except asyncio.IncompleteReadError:
             logger.info(f"Session {self.session_id}: Pool disconnected")
@@ -322,6 +501,103 @@ class ProxySession:
         except Exception as e:
             # Never let publishing errors affect relaying
             logger.error(f"Error publishing ShareEvent: {e}", exc_info=True)
+
+    async def _maybe_auto_replay(
+        self,
+        message,
+        message_data: str,
+    ) -> None:
+        """
+        Auto-replay a mining.submit message if enabled (load testing).
+
+        Args:
+            message: Parsed Stratum message
+            message_data: The raw message string
+        """
+        try:
+            # Check if auto-replay is enabled for this session
+            if not await self.storage.is_session_auto_replay_enabled(self.session_id):
+                return
+
+            # Get the auto-replay count
+            replay_count = await self.storage.get_session_auto_replay_count(self.session_id)
+
+            logger.info(
+                f"Auto-replaying mining.submit {replay_count}x for session {self.session_id}"
+            )
+
+            # Replay the message N times with random delays
+            import random
+            for i in range(replay_count):
+                # Random delay between 1-5ms for high load testing
+                delay = random.uniform(0.001, 0.005)
+                await asyncio.sleep(delay)
+
+                # Create the replay through the existing replay_message method
+                try:
+                    response_dict, latency_ms = await self.replay_message(message_data)
+
+                    # Capture the replay message with index
+                    replay_msg_id = await self.capture_replay_message(
+                        request_data=message_data,
+                        response_dict=response_dict,
+                        latency_ms=latency_ms,
+                        replay_index=i
+                    )
+
+                    logger.debug(
+                        f"Auto-replay {i+1}/{replay_count} completed "
+                        f"for session {self.session_id}, msg_id={replay_msg_id}, latency={latency_ms:.1f}ms"
+                    )
+                except Exception as e:
+                    logger.error(f"Auto-replay {i+1}/{replay_count} failed: {e}")
+
+        except Exception as e:
+            # Never let auto-replay errors affect relaying
+            logger.error(f"Error in auto-replay: {e}", exc_info=True)
+
+    async def disconnect_from_pool(self) -> None:
+        """
+        Forcefully disconnect the session.
+
+        This closes both the pool and miner connections, forcing the miner
+        to completely reconnect and establish a fresh session.
+        """
+        logger.info(f"Session {self.session_id}: Force disconnecting session (pool + miner)")
+
+        # Update pool connection status to disconnected
+        await self.storage.update_session_pool_status(
+            session_id=self.session_id,
+            connected=False,
+            pool_peer=None,
+        )
+
+        # Close the pool connection
+        if self.pool_writer:
+            try:
+                self.pool_writer.close()
+                await self.pool_writer.wait_closed()
+                logger.info(f"Session {self.session_id}: Pool connection closed")
+            except Exception as e:
+                logger.error(f"Error force-closing pool connection: {e}")
+
+        # Close the miner connection to force full reconnect
+        if self.miner_writer:
+            try:
+                self.miner_writer.close()
+                await self.miner_writer.wait_closed()
+                logger.info(f"Session {self.session_id}: Miner connection closed")
+            except Exception as e:
+                logger.error(f"Error force-closing miner connection: {e}")
+
+        # Set to None to ensure they're not used again
+        self.pool_writer = None
+        self.pool_reader = None
+        self.miner_writer = None
+        self.miner_reader = None
+
+        # Mark session as not running to stop relay loops
+        self._running = False
 
     async def _cleanup(self) -> None:
         """Clean up connections."""

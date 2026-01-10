@@ -6,7 +6,7 @@ export interface CapturedMessage {
   id: string;
   ts_recv: string;
   ts_fwd: string | null;
-  direction: 'miner_to_pool' | 'pool_to_miner';
+  direction: 'miner_to_pool' | 'pool_to_miner' | 'hashscope_to_pool';
   session_id: string;
   peer: string;
   raw: string;
@@ -20,6 +20,14 @@ export interface CapturedMessage {
   response?: Record<string, any> | null;
   response_ts_recv?: string | null;
   response_raw?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface ReplayResponse {
+  success: boolean;
+  pool_response?: Record<string, any> | null;
+  error?: string | null;
+  latency_ms?: number | null;
 }
 
 export interface Session {
@@ -33,6 +41,12 @@ export interface Session {
   difficulty?: number | null;
   broadcast_enabled?: boolean;
   repeat_count?: number;
+  auto_replay_enabled?: boolean;
+  auto_replay_count?: number;
+  pool_host?: string | null;
+  pool_port?: number | null;
+  pool_connected?: boolean;
+  pool_peer?: string | null;
   stats?: {
     total_messages: number;
     miner_to_pool: number;
@@ -81,7 +95,7 @@ export class HashScopeAPI {
 
   async getMessages(params?: {
     session_id?: string;
-    direction?: 'miner_to_pool' | 'pool_to_miner';
+    direction?: 'miner_to_pool' | 'pool_to_miner' | 'hashscope_to_pool';
     limit?: number;
     offset?: number;
   }): Promise<CapturedMessage[]> {
@@ -106,6 +120,22 @@ export class HashScopeAPI {
     return response.json();
   }
 
+  async replayMessage(messageId: string, modifiedMessage?: string): Promise<ReplayResponse> {
+    const body = modifiedMessage ? { modified_message: modifiedMessage } : {};
+    const response = await fetch(`${API_BASE}/messages/${messageId}/replay`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.detail || 'Failed to replay message');
+    }
+    return response.json();
+  }
+
   connectWebSocket(onMessage: (message: CapturedMessage) => void): WebSocket {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -123,7 +153,7 @@ export class HashScopeAPI {
     return ws;
   }
 
-  // Session broadcast control (Iteration 2)
+  // Session broadcast control
   async enableSessionBroadcast(sessionId: string): Promise<void> {
     const response = await fetch(`${API_BASE}/sessions/${sessionId}/broadcast/enable`, {
       method: 'POST',
@@ -171,7 +201,55 @@ export class HashScopeAPI {
     return response.json();
   }
 
-  // Agent telemetry (Iteration 2)
+  // Auto-replay control (load testing)
+  async enableSessionAutoReplay(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/auto-replay/enable`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to enable auto-replay');
+    }
+  }
+
+  async disableSessionAutoReplay(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/auto-replay/disable`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to disable auto-replay');
+    }
+  }
+
+  async setSessionAutoReplayCount(sessionId: string, count: number): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/auto-replay-count`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auto_replay_count: count }),
+    });
+    if (!response.ok) {
+      throw new Error('Failed to set auto-replay count');
+    }
+  }
+
+  async getSessionAutoReplayCount(sessionId: string): Promise<{ auto_replay_count: number }> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/auto-replay-count`);
+    if (!response.ok) {
+      throw new Error('Failed to get auto-replay count');
+    }
+    return response.json();
+  }
+
+  // Session control
+  async disconnectSession(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/sessions/${sessionId}/disconnect`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      throw new Error('Failed to disconnect session');
+    }
+  }
+
+  // Agent telemetry
   async getAgents(): Promise<Agent[]> {
     const response = await fetch(`${API_BASE}/agents`);
     if (!response.ok) {

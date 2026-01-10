@@ -4,8 +4,8 @@ import { Button } from '@/components/ui/button';
 interface MessageFiltersProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
-  directionFilter: 'all' | 'miner_to_pool' | 'pool_to_miner';
-  onDirectionFilterChange: (filter: 'all' | 'miner_to_pool' | 'pool_to_miner') => void;
+  directionFilter: 'all' | 'miner_to_pool' | 'pool_to_miner' | 'hashscope_to_pool';
+  onDirectionFilterChange: (filter: 'all' | 'miner_to_pool' | 'pool_to_miner' | 'hashscope_to_pool') => void;
   showErrorsOnly: boolean;
   onShowErrorsOnlyChange: (show: boolean) => void;
 }
@@ -49,6 +49,13 @@ export function MessageFilters({
           onClick={() => onDirectionFilterChange('pool_to_miner')}
         >
           Pool → Miner
+        </Button>
+        <Button
+          variant={directionFilter === 'hashscope_to_pool' ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => onDirectionFilterChange('hashscope_to_pool')}
+        >
+          Replay
         </Button>
       </div>
 

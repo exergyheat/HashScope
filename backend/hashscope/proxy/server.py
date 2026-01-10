@@ -38,6 +38,7 @@ class ProxyServer:
         self.storage = storage
         self.server: Optional[asyncio.Server] = None
         self._sessions: list[asyncio.Task] = []
+        self._active_sessions: dict[str, ProxySession] = {}  # Track active sessions by session_id
 
         # Nostr client (Iteration 2)
         self.nostr_client: Optional[NostrClient] = None
@@ -123,12 +124,26 @@ class ProxyServer:
             settings=self.settings,
         )
 
-        # Start the session in a task
-        task = asyncio.create_task(session.start())
+        # Store active session
+        self._active_sessions[session.session_id] = session
+
+        # Start the session in a task with cleanup
+        async def run_session():
+            try:
+                await session.start()
+            finally:
+                # Clean up when session ends
+                self._active_sessions.pop(session.session_id, None)
+
+        task = asyncio.create_task(run_session())
         self._sessions.append(task)
 
         # Clean up completed sessions
         self._sessions = [t for t in self._sessions if not t.done()]
+
+    def get_active_session(self, session_id: str) -> Optional[ProxySession]:
+        """Get an active session by ID."""
+        return self._active_sessions.get(session_id)
 
     def _handle_telemetry_event(self, event: dict) -> None:
         """

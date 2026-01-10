@@ -1,0 +1,84 @@
+site_name: HashScope Documentation
+site_description: Bitcoin Mining MITM Proxy - Capture, decode, and visualize Stratum protocol messages
+site_author: 256 Foundation
+site_url: http://localhost:3000/docs/
+use_directory_urls: true
+repo_url: https://github.com/256foundation/HashScope
+repo_name: 256foundation/HashScope
+
+theme:
+  name: material
+  palette:
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Overview: overview.md
+    - Quick Start: quickstart.md
+  - Architecture:
+    - System Architecture: architecture.md
+    - Agent Fleet & Nostr: agent-fleet.md
+  - Development:
+    - Developer Guide: developer-guide.md
+    - API Reference: api-reference.md
+    - Contributing: contributing.md
+
+plugins:
+  - search
+  - mermaid2
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/256foundation/HashScope
+

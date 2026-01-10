@@ -21,6 +21,9 @@ export function MessageTable({ messages, selectedMessageId, onSelectMessage, new
     if (direction === 'miner_to_pool') {
       return <Badge variant="default">Miner → Pool</Badge>;
     }
+    if (direction === 'hashscope_to_pool') {
+      return <Badge variant="outline" className="bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-100 border-purple-300 dark:border-purple-700">HashScope → Pool</Badge>;
+    }
     return <Badge variant="secondary">Pool → Miner</Badge>;
   };
 
@@ -58,12 +61,24 @@ export function MessageTable({ messages, selectedMessageId, onSelectMessage, new
     return message.peer || message.session_id.substring(0, 8);
   };
 
+  const getLatencyColor = (latencyMs: number | null | undefined): string => {
+    if (latencyMs === null || latencyMs === undefined) return '';
+    if (latencyMs > 200) return 'text-red-600 font-semibold';
+    if (latencyMs > 50) return 'text-yellow-600 font-semibold';
+    return 'text-green-600';
+  };
+
+  const formatLatency = (latencyMs: number | null | undefined): string => {
+    if (latencyMs === null || latencyMs === undefined) return '-';
+    return `${latencyMs.toFixed(1)}ms`;
+  };
+
   return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="overflow-auto max-h-[600px]">
-          <table className="w-full text-sm">
-            <thead className="bg-muted sticky top-0">
+    <Card className="h-full w-full flex flex-col">
+      <CardContent className="p-0 flex-1 overflow-hidden">
+        <div className="overflow-auto h-full w-full">
+          <table className="w-full text-sm table-fixed">
+            <thead className="bg-muted sticky top-0 z-10">
               <tr>
                 {showSessionColumn && (
                   <th className="text-left p-3 font-medium">Session</th>
@@ -74,6 +89,7 @@ export function MessageTable({ messages, selectedMessageId, onSelectMessage, new
                 <th className="text-left p-3 font-medium">ID</th>
                 <th className="text-left p-3 font-medium">Params/Result</th>
                 <th className="text-left p-3 font-medium">Size</th>
+                <th className="text-left p-3 font-medium">Latency</th>
                 <th className="text-left p-3 font-medium">Status</th>
               </tr>
             </thead>
@@ -110,6 +126,9 @@ export function MessageTable({ messages, selectedMessageId, onSelectMessage, new
                     )}
                   </td>
                   <td className="p-3 text-xs">{message.size_bytes}B</td>
+                  <td className={`p-3 font-mono text-xs ${getLatencyColor(message.latency_ms)}`}>
+                    {formatLatency(message.latency_ms)}
+                  </td>
                   <td className="p-3">
                     <div className="flex gap-1">
                       {message.parse_error ? (

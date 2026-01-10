@@ -49,18 +49,28 @@ class CaptureStorage:
         self._session_broadcast_enabled: dict[str, bool] = {}
         self._session_repeat_count: dict[str, int] = {}  # Number of times to repeat each share
 
-    async def add_message(self, message: CapturedMessage) -> None:
+        # Auto-replay control (load testing)
+        self._session_auto_replay_enabled: dict[str, bool] = {}
+        self._session_auto_replay_count: dict[str, int] = {}  # Number of auto-replays (1-100)
+
+    async def add_message(self, message: CapturedMessage, notify: bool = True) -> None:
         """
         Add a captured message to storage.
         Automatically pairs requests with their responses.
 
         Args:
             message: The captured message to store
+            notify: Whether to notify WebSocket subscribers (default True)
         """
         should_notify = False
         is_new_message = False  # Track if we're adding a new message vs updating existing
 
         async with self._lock:
+            # Check if message with this ID already exists (deduplication)
+            existing_msg = next((m for m in self._messages if m.id == message.id), None)
+            if existing_msg:
+                logger.debug(f"Message {message.id} already exists, skipping")
+                return
             # Check if this is a response to a pending request
             if message.is_response and message.jsonrpc_id is not None:
                 # Look for matching request in this session
@@ -74,6 +84,10 @@ class CaptureStorage:
                     request_msg.response_ts_recv = message.ts_recv
                     request_msg.response_raw = message.raw
                     request_msg.paired_message_id = message.id
+
+                    # Calculate latency in milliseconds
+                    latency_delta = message.ts_recv - request_msg.ts_recv
+                    request_msg.latency_ms = latency_delta.total_seconds() * 1000
 
                     # Remove from pending
                     del pending[message.jsonrpc_id]
@@ -129,6 +143,9 @@ class CaptureStorage:
                     "user_agent": None,
                     "mining_session_id": None,
                     "difficulty": None,
+                    "pool_host": None,
+                    "pool_port": None,
+                    "pool_connected": False,
                 }
 
             metadata = self._session_metadata[message.session_id]
@@ -161,7 +178,7 @@ class CaptureStorage:
                     logger.debug(f"Updated difficulty for session {message.session_id}: {params[0]}")
 
         # Notify subscribers (outside lock to avoid blocking)
-        if should_notify:
+        if should_notify and notify:
             await self._notify_subscribers(notify_msg)
 
     async def get_messages(
@@ -231,6 +248,18 @@ class CaptureStorage:
                 # Add broadcast status
                 session_data["broadcast_enabled"] = self._session_broadcast_enabled.get(session_id, False)
                 session_data["repeat_count"] = self._session_repeat_count.get(session_id, 1)
+                # Add auto-replay status
+                session_data["auto_replay_enabled"] = self._session_auto_replay_enabled.get(session_id, False)
+                session_data["auto_replay_count"] = self._session_auto_replay_count.get(session_id, 1)
+
+                # Ensure pool fields exist (for backward compatibility with old sessions)
+                if "pool_host" not in session_data:
+                    session_data["pool_host"] = None
+                if "pool_port" not in session_data:
+                    session_data["pool_port"] = None
+                if "pool_connected" not in session_data:
+                    session_data["pool_connected"] = None
+
                 sessions.append(session_data)
             return sessions
 
@@ -363,4 +392,92 @@ class CaptureStorage:
         """
         async with self._lock:
             return self._session_repeat_count.get(session_id, 1)
+
+    # Auto-replay control methods (load testing)
+
+    async def enable_session_auto_replay(self, session_id: str) -> None:
+        """Enable auto-replay for a session."""
+        async with self._lock:
+            self._session_auto_replay_enabled[session_id] = True
+            logger.info(f"Enabled auto-replay for session {session_id}")
+
+    async def disable_session_auto_replay(self, session_id: str) -> None:
+        """Disable auto-replay for a session."""
+        async with self._lock:
+            self._session_auto_replay_enabled[session_id] = False
+            logger.info(f"Disabled auto-replay for session {session_id}")
+
+    async def is_session_auto_replay_enabled(self, session_id: str) -> bool:
+        """Check if auto-replay is enabled for a session."""
+        async with self._lock:
+            return self._session_auto_replay_enabled.get(session_id, False)
+
+    async def set_session_auto_replay_count(self, session_id: str, count: int) -> None:
+        """Set the auto-replay count for a session (1-900000)."""
+        if not (1 <= count <= 900_000):
+            raise ValueError("Auto-replay count must be between 1 and 900,000")
+        async with self._lock:
+            self._session_auto_replay_count[session_id] = count
+            logger.info(f"Session {session_id} auto-replay count set to {count}")
+
+    async def get_session_auto_replay_count(self, session_id: str) -> int:
+        """Get the auto-replay count for a session (default 1)."""
+        async with self._lock:
+            return self._session_auto_replay_count.get(session_id, 1)
+
+    async def register_session(
+        self,
+        session_id: str,
+        peer: str,
+        pool_host: str,
+        pool_port: int,
+    ) -> None:
+        """
+        Register a session when it starts (before pool connection).
+
+        Args:
+            session_id: The session ID
+            peer: Miner peer address (IP:port)
+            pool_host: Target pool hostname
+            pool_port: Target pool port
+        """
+        async with self._lock:
+            if session_id not in self._session_metadata:
+                now = datetime.utcnow()
+                self._session_metadata[session_id] = {
+                    "session_id": session_id,
+                    "peer": peer,
+                    "first_seen": now,
+                    "last_seen": now,
+                    "message_count": 0,
+                    "user_agent": None,
+                    "mining_session_id": None,
+                    "difficulty": None,
+                    "pool_host": pool_host,
+                    "pool_port": pool_port,
+                    "pool_connected": False,
+                }
+                logger.info(f"Registered session {session_id} targeting pool {pool_host}:{pool_port}")
+
+    async def update_session_pool_status(
+        self,
+        session_id: str,
+        connected: bool,
+        pool_peer: Optional[str] = None,
+    ) -> None:
+        """
+        Update pool connection status for a session.
+
+        Args:
+            session_id: The session ID
+            connected: Whether pool connection is established
+            pool_peer: Optional resolved pool peer address (IP:port)
+        """
+        async with self._lock:
+            if session_id in self._session_metadata:
+                self._session_metadata[session_id]["pool_connected"] = connected
+                if pool_peer:
+                    self._session_metadata[session_id]["pool_peer"] = pool_peer
+                status_str = "connected" if connected else "failed"
+                logger.info(f"Session {session_id} pool status: {status_str}")
 

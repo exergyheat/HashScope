@@ -37,8 +37,9 @@ async def lifespan(app: FastAPI):
     # Start proxy server in background
     proxy_server = ProxyServer(settings, storage)
 
-    # Initialize telemetry storage (Iteration 2)
+    # Initialize dependencies (Iteration 2)
     dependencies.init_telemetry_storage(proxy_server.telemetry_storage)
+    dependencies.init_proxy_server(proxy_server)
 
     proxy_task = asyncio.create_task(proxy_server.start())
 

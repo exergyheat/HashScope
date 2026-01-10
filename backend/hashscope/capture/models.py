@@ -10,6 +10,7 @@ class MessageDirection(str, Enum):
     """Direction of message flow."""
     MINER_TO_POOL = "miner_to_pool"
     POOL_TO_MINER = "pool_to_miner"
+    HASHSCOPE_TO_POOL = "hashscope_to_pool"  # Replay for debugging
 
 
 class CapturedMessage(BaseModel):
@@ -36,6 +37,7 @@ class CapturedMessage(BaseModel):
     response: Optional[dict[str, Any]] = None  # The paired response message
     response_ts_recv: Optional[datetime] = None
     response_raw: Optional[str] = None
+    latency_ms: Optional[float] = None  # Response latency in milliseconds
 
     class Config:
         json_encoders = {

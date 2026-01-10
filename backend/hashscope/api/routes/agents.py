@@ -12,6 +12,13 @@ from ...nostr.schemas import TelemetryEvent
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# Import for handling WebSocket disconnections gracefully
+try:
+    from uvicorn.protocols.utils import ClientDisconnected
+except ImportError:
+    # Fallback if running under different ASGI server
+    ClientDisconnected = Exception
+
 
 @router.get("/agents")
 async def get_agents():
@@ -84,18 +91,28 @@ async def agents_websocket(websocket: WebSocket):
                 # Wait for new telemetry with timeout
                 telemetry = await asyncio.wait_for(queue.get(), timeout=30.0)
 
-                await websocket.send_json({
-                    "type": "telemetry",
-                    "agent_id": telemetry.agent_id,
-                    "data": telemetry.model_dump(),
-                })
+                try:
+                    await websocket.send_json({
+                        "type": "telemetry",
+                        "agent_id": telemetry.agent_id,
+                        "data": telemetry.model_dump(),
+                    })
+                except (WebSocketDisconnect, ClientDisconnected):
+                    # Client disconnected during send, exit gracefully
+                    break
 
             except asyncio.TimeoutError:
                 # Send ping to keep connection alive
-                await websocket.send_json({"type": "ping"})
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except (WebSocketDisconnect, ClientDisconnected):
+                    # Client disconnected during ping, exit gracefully
+                    break
 
     except WebSocketDisconnect:
-        logger.info("Agent telemetry WebSocket disconnected")
+        logger.info("Agent telemetry WebSocket disconnected (normal)")
+    except ClientDisconnected:
+        logger.info("Agent telemetry WebSocket client disconnected (normal)")
     except Exception as e:
         logger.error(f"Error in agent telemetry WebSocket: {e}", exc_info=True)
     finally:
