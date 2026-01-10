@@ -123,7 +123,7 @@ Open an issue for any questions about contributing!
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT License).
 
-This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/256foundation/HashScope/blob/main/LICENSE) file for details.
 
 Copyright © 2024 256 Foundation
 
