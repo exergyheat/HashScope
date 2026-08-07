@@ -96,12 +96,10 @@ class ProxyServer:
         logger.info(f"Forwarding to {self.settings.pool_host}:{self.settings.pool_port}")
         if self.settings.hashsplit_enabled:
             logger.info(
-                "Hashsplit ENABLED: fee_pct=%s fee_user=%s fee_pool=%s:%s switch_s=%s",
+                "Hashsplit ENABLED (share-band): fee_pct=%s customer_user=%s fee_user=%s",
                 self.settings.hashsplit_fee_percent,
-                self.settings.hashsplit_fee_user or "(derive from authorize)",
-                self.settings.get_fee_pool_hostname(),
-                self.settings.get_fee_pool_port(),
-                self.settings.hashsplit_switch_seconds,
+                self.settings.hashsplit_customer_user or "(from miner authorize)",
+                self.settings.hashsplit_fee_user or "(derive from customer)",
             )
 
         async with self.server:

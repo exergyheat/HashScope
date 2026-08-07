@@ -23,21 +23,20 @@ class Settings(BaseSettings):
     pool_host: str
     pool_port: int = 3333
 
-    # Hashsplit (Exergy): dual-upstream weighted time-slice on the same or different pools.
-    # When enabled, each miner session opens two upstream connections:
-    #   leg A = customer (authorize as hashsplit_customer_user, or pass-through if unset)
-    #   leg B = fee (authorize as hashsplit_fee_user, or derived)
-    # Jobs are forwarded only from the active leg; active leg switches on a timer
-    # so a single long-lived miner can exercise both workers (e.g. 50/50 lab test).
+    # Hashsplit (Exergy): same-pool share-band worker routing (DATUM-style).
+    # One upstream socket; each mining.submit is credited to customer or fee worker
+    # by mapping a 16-bit hash of share fields onto weight bands (e.g. 50/50 lab).
+    # Multi-pool (different upstreams) is not handled here — reintroduce dual-upstream later.
     hashsplit_enabled: bool = False
-    hashsplit_fee_percent: float = 50.0  # target % of time on fee leg
-    hashsplit_customer_user: Optional[str] = None  # full worker for customer leg (else miner user)
+    hashsplit_fee_percent: float = 50.0  # target % of shares on fee worker
+    hashsplit_customer_user: Optional[str] = None  # full worker (else miner user)
     hashsplit_customer_password: str = "x"
-    hashsplit_fee_user: Optional[str] = None  # full worker name for fee leg
+    hashsplit_fee_user: Optional[str] = None  # full worker for fee band (or derived)
     hashsplit_fee_password: str = "x"
-    hashsplit_fee_pool_host: Optional[str] = None  # default: same as pool_host
-    hashsplit_fee_pool_port: Optional[int] = None  # default: same as pool_port
-    hashsplit_switch_seconds: float = 30.0  # base slice seconds; 50/50 → equal 30s each leg
+    # Kept for env compatibility; unused in share-band mode (single pool).
+    hashsplit_fee_pool_host: Optional[str] = None
+    hashsplit_fee_pool_port: Optional[int] = None
+    hashsplit_switch_seconds: float = 30.0  # unused in share-band mode
 
     # API settings
     api_host: str = "0.0.0.0"
