@@ -52,3 +52,27 @@ def test_extract_subscribe_extranonce():
     en1, en2 = extract_subscribe_extranonce(result)
     assert en1 == "deadbeef"
     assert en2 == 8
+
+
+def test_namespace_roundtrip():
+    from hashscope.proxy.hashsplit import (
+        denamespace_job_id,
+        namespace_job_id,
+        rewrite_notify_job_id,
+        rewrite_submit_for_leg,
+    )
+
+    assert namespace_job_id("customer", "abc") == "c.abc"
+    assert namespace_job_id("fee", "abc") == "f.abc"
+    assert denamespace_job_id("c.abc") == ("customer", "abc")
+    assert denamespace_job_id("f.abc") == ("fee", "abc")
+
+    notify = b'{"method":"mining.notify","params":["job1","x"]}\n'
+    out = rewrite_notify_job_id(notify, "fee")
+    assert json.loads(out)["params"][0] == "f.job1"
+
+    submit = b'{"id":9,"method":"mining.submit","params":["w","f.job1","e2","t","n"]}\n'
+    out2 = rewrite_submit_for_leg(submit, "fee", "fee.worker")
+    msg = json.loads(out2)
+    assert msg["params"][0] == "fee.worker"
+    assert msg["params"][1] == "job1"

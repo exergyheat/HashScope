@@ -72,6 +72,73 @@ def extract_notify_job_id(msg: dict[str, Any]) -> Optional[str]:
     return str(job_id) if job_id is not None else None
 
 
+# Prefixes so dual upstreams never collide on job_id inside the miner.
+JOB_PREFIX_CUSTOMER = "c."
+JOB_PREFIX_FEE = "f."
+
+
+def namespace_job_id(leg: str, raw_job_id: str) -> str:
+    """Tag a pool job id with the leg that issued it."""
+    if leg == "fee":
+        return f"{JOB_PREFIX_FEE}{raw_job_id}"
+    return f"{JOB_PREFIX_CUSTOMER}{raw_job_id}"
+
+
+def denamespace_job_id(namespaced: str) -> tuple[Optional[str], str]:
+    """
+    Reverse namespace_job_id.
+
+    Returns (leg, raw_job_id). If no known prefix, leg is None.
+    """
+    if namespaced.startswith(JOB_PREFIX_FEE):
+        return "fee", namespaced[len(JOB_PREFIX_FEE) :]
+    if namespaced.startswith(JOB_PREFIX_CUSTOMER):
+        return "customer", namespaced[len(JOB_PREFIX_CUSTOMER) :]
+    return None, namespaced
+
+
+def rewrite_notify_job_id(line: bytes, leg: str) -> bytes:
+    """Rewrite mining.notify job_id with a leg prefix before sending to miner."""
+    try:
+        msg = json.loads(line.decode("utf-8", errors="replace").strip())
+    except json.JSONDecodeError:
+        return line
+    if msg.get("method") != "mining.notify":
+        return line
+    params = msg.get("params")
+    if not isinstance(params, list) or not params:
+        return line
+    raw = str(params[0])
+    params = list(params)
+    params[0] = namespace_job_id(leg, raw)
+    msg["params"] = params
+    return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def rewrite_submit_for_leg(line: bytes, leg: str, fee_user: Optional[str]) -> bytes:
+    """
+    Strip namespaced job_id back to pool raw id and set worker for the leg.
+    """
+    try:
+        msg = json.loads(line.decode("utf-8", errors="replace").strip())
+    except json.JSONDecodeError:
+        return line
+    if msg.get("method") != "mining.submit":
+        return line
+    params = msg.get("params")
+    if not isinstance(params, list) or len(params) < 2:
+        return line
+    params = list(params)
+    detected_leg, raw_job = denamespace_job_id(str(params[1]))
+    # Prefer leg from job id prefix when present
+    use_leg = detected_leg or leg
+    params[1] = raw_job
+    if use_leg == "fee" and fee_user:
+        params[0] = fee_user
+    msg["params"] = params
+    return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def extract_subscribe_extranonce(result: Any) -> tuple[Optional[str], Optional[int]]:
     """
     Parse mining.subscribe result for extranonce1 and extranonce2_size.

@@ -26,11 +26,14 @@ from ..config.settings import Settings
 from .hashsplit import (
     build_set_difficulty,
     build_set_extranonce,
+    denamespace_job_id,
     derive_fee_user,
     extract_notify_job_id,
     extract_submit_job_id,
     extract_subscribe_extranonce,
     rewrite_authorize_user,
+    rewrite_notify_job_id,
+    rewrite_submit_for_leg,
 )
 
 logger = logging.getLogger(__name__)
@@ -438,18 +441,14 @@ class ProxySession:
 
         if method == "mining.submit":
             job_id = extract_submit_job_id(msg or {})
-            leg = self._job_leg.get(job_id, self.active_leg) if job_id else self.active_leg
-            # Ensure submit worker name matches the leg (some miners always send customer user)
-            if leg == LEG_FEE and self._fee_user and msg:
-                params = list(msg.get("params") or [])
-                if params:
-                    params[0] = self._fee_user
-                    msg = dict(msg)
-                    msg["params"] = params
-                    data = (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
-            await self._write_to_leg(leg, data)
-            logger.debug(
-                f"Session {self.session_id}: submit job={job_id} → leg={leg}"
+            leg_from_job, _raw = denamespace_job_id(job_id) if job_id else (None, "")
+            leg = leg_from_job or (
+                self._job_leg.get(job_id, self.active_leg) if job_id else self.active_leg
+            )
+            out = rewrite_submit_for_leg(data, leg, self._fee_user)
+            await self._write_to_leg(leg, out)
+            logger.info(
+                f"Session {self.session_id}: submit namespaced_job={job_id} → leg={leg}"
             )
             return
 
@@ -554,18 +553,18 @@ class ProxySession:
                 await self.miner_writer.drain()
             return
 
-        # Track jobs; only forward notifies from active leg
+        # Track jobs; only forward notifies from active leg.
+        # Namespace job ids so dual upstreams never collide inside the miner.
         if method == "mining.notify":
             job_id = extract_notify_job_id(msg)
             if job_id:
                 self._job_leg[job_id] = leg
-                # Bound map growth
                 if len(self._job_leg) > 5000:
-                    # drop arbitrary old entries
                     for k in list(self._job_leg.keys())[:1000]:
                         self._job_leg.pop(k, None)
             if leg == self.active_leg:
-                self.miner_writer.write(data)
+                out = rewrite_notify_job_id(data, leg)
+                self.miner_writer.write(out)
                 await self.miner_writer.drain()
             return
 
