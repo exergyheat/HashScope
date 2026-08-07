@@ -88,6 +88,7 @@ class ProxySession:
         self._worker_bands: list[tuple[str, int]] = []
         self._authorized_workers: set[str] = set()
         self._internal_auth_ids: set[Any] = set()
+        self._fee_password: str = "x"
 
         self._message_counter = 0
         self._running = False
@@ -345,14 +346,14 @@ class ProxySession:
                         )
                         cust_pass = self.settings.hashsplit_customer_password
                         fee_pass = self.settings.hashsplit_fee_password
-                        # Forward customer authorize with miner's id (miner needs the reply).
-                        # Side-channel authorize fee worker only.
+                        self._fee_password = fee_pass
+                        # One authorize only (customer). Fee worker is authorized
+                        # lazily on first fee-band share — dual authorize at
+                        # handshake was closing 256foundation sessions.
                         out = rewrite_authorize_user(
                             data, self._customer_user, cust_pass
                         )
                         self._authorized_workers.add(self._customer_user)
-                        if self._fee_user != self._customer_user:
-                            await self._ensure_pool_authorize(self._fee_user, fee_pass)
                         capture_data = out
                         capture_parsed = self.parser.parse(out)
                         await self.storage.update_session_fields(
@@ -373,9 +374,20 @@ class ProxySession:
                                 data.decode("utf-8", errors="replace").strip()
                             )
                             params = list(msg.get("params") or [])
+                            # Strip legacy dual-upstream job-id prefixes if miner still has them
+                            if len(params) > 1 and isinstance(params[1], str):
+                                jid = params[1]
+                                if jid.startswith("c.") or jid.startswith("f."):
+                                    params[1] = jid[2:]
+                                    msg["params"] = params
+                                    data = (
+                                        json.dumps(msg, separators=(",", ":")) + "\n"
+                                    ).encode("utf-8")
                             rnd = share_rnd_from_submit(params)
                             worker = pick_worker_for_rnd(rnd, self._worker_bands)
                             if worker:
+                                # Rewrite worker only — no second mining.authorize.
+                                # Dual-auth on one socket was closing 256foundation sessions.
                                 out = rewrite_submit_worker(data, worker)
                                 capture_data = out
                                 capture_parsed = self.parser.parse(out)
