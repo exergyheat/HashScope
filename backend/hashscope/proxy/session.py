@@ -342,27 +342,42 @@ class ProxySession:
                     )
 
                 out = data
-                # Fee leg: rewrite mining.authorize worker name
+                # Fee leg: rewrite authorize + submit worker names
                 if (
                     self.hashsplit_enabled
                     and self.hashsplit_leg == LEG_FEE
                     and parsed.success
                     and parsed.message
-                    and parsed.message.method == "mining.authorize"
                 ):
-                    params = parsed.message.params or []
-                    customer_user = str(params[0]) if params else "worker"
-                    fee_user = self._assigned_fee_user or derive_fee_user(
-                        customer_user,
-                        self.settings.hashsplit_fee_user if self.settings else None,
-                    )
-                    self._fee_user = fee_user
-                    fee_pass = self.settings.hashsplit_fee_password if self.settings else "x"
-                    out = rewrite_authorize_user(data, fee_user, fee_pass)
-                    logger.info(
-                        f"Session {self.session_id}: fee authorize "
-                        f"{customer_user!r} → {fee_user!r}"
-                    )
+                    method = parsed.message.method
+                    if method == "mining.authorize":
+                        params = parsed.message.params or []
+                        customer_user = str(params[0]) if params else "worker"
+                        fee_user = self._assigned_fee_user or derive_fee_user(
+                            customer_user,
+                            self.settings.hashsplit_fee_user if self.settings else None,
+                        )
+                        self._fee_user = fee_user
+                        fee_pass = (
+                            self.settings.hashsplit_fee_password if self.settings else "x"
+                        )
+                        out = rewrite_authorize_user(data, fee_user, fee_pass)
+                        logger.info(
+                            f"Session {self.session_id}: fee authorize "
+                            f"{customer_user!r} → {fee_user!r}"
+                        )
+                    elif method == "mining.submit" and self._fee_user:
+                        try:
+                            msg = json.loads(data.decode("utf-8", errors="replace").strip())
+                            params = list(msg.get("params") or [])
+                            if params:
+                                params[0] = self._fee_user
+                                msg["params"] = params
+                                out = (
+                                    json.dumps(msg, separators=(",", ":")) + "\n"
+                                ).encode("utf-8")
+                        except json.JSONDecodeError:
+                            pass
 
                 if self.pool_writer:
                     self.pool_writer.write(out)
