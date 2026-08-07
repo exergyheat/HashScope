@@ -47,6 +47,13 @@ export interface Session {
   pool_port?: number | null;
   pool_connected?: boolean;
   pool_peer?: string | null;
+  /** Hashsplit: which upstream leg this TCP session was assigned */
+  hashsplit_leg?: 'customer' | 'fee' | string | null;
+  hashsplit_enabled?: boolean | null;
+  /** Worker name the miner authorized as (pass-through) */
+  customer_worker?: string | null;
+  /** Worker name sent upstream after hashsplit rewrite */
+  upstream_worker?: string | null;
   stats?: {
     total_messages: number;
     miner_to_pool: number;

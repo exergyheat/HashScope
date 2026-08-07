@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import Optional, Callable, Awaitable
+from typing import Any, Optional, Callable, Awaitable
 
 from .models import CapturedMessage, MessageDirection
 
@@ -480,4 +480,23 @@ class CaptureStorage:
                     self._session_metadata[session_id]["pool_peer"] = pool_peer
                 status_str = "connected" if connected else "failed"
                 logger.info(f"Session {session_id} pool status: {status_str}")
+
+    async def update_session_fields(
+        self,
+        session_id: str,
+        **fields: Any,
+    ) -> None:
+        """
+        Merge arbitrary fields into session metadata (hashsplit labels, workers, etc.).
+
+        Ignores unknown sessions. Does not remove existing keys unless overwritten.
+        """
+        if not fields:
+            return
+        async with self._lock:
+            if session_id not in self._session_metadata:
+                return
+            for key, value in fields.items():
+                if value is not None:
+                    self._session_metadata[session_id][key] = value
 

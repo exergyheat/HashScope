@@ -169,6 +169,35 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onSe
               </div>
             )}
 
+            {/* Hashsplit leg + upstream worker (fee rewrite) */}
+            {(session.hashsplit_leg || session.upstream_worker) && (
+              <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                {session.hashsplit_leg && (
+                  <Badge
+                    variant={session.hashsplit_leg === 'fee' ? 'default' : 'secondary'}
+                    className="text-[10px] px-1.5 py-0"
+                  >
+                    {session.hashsplit_leg === 'fee' ? 'FEE' : 'CUSTOMER'}
+                  </Badge>
+                )}
+                {session.upstream_worker && (
+                  <span
+                    className="font-mono text-[10px] opacity-90 truncate max-w-[140px]"
+                    title={
+                      session.customer_worker &&
+                      session.customer_worker !== session.upstream_worker
+                        ? `${session.customer_worker} → ${session.upstream_worker}`
+                        : session.upstream_worker
+                    }
+                  >
+                    {session.upstream_worker.includes('.')
+                      ? session.upstream_worker.split('.').slice(-1)[0]
+                      : session.upstream_worker}
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Peer IP:Port and Message Count */}
             <div className="flex items-center justify-between mb-1">
               <span className="font-mono text-xs opacity-90">

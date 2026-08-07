@@ -256,6 +256,12 @@ class ProxySession:
             pool_host=self.pool_host,
             pool_port=self.pool_port,
         )
+        if self.hashsplit_enabled:
+            await self.storage.update_session_fields(
+                self.session_id,
+                hashsplit_leg=self.hashsplit_leg,
+                hashsplit_enabled=True,
+            )
 
         try:
             # Connect to upstream pool
@@ -329,20 +335,12 @@ class ProxySession:
                 ts_recv = datetime.utcnow()
                 parsed = self.parser.parse(data)
 
-                await self._capture_message(
-                    data=data,
-                    direction=MessageDirection.MINER_TO_POOL,
-                    ts_recv=ts_recv,
-                    parsed=parsed,
-                )
-
-                if parsed.success and parsed.message:
-                    asyncio.create_task(
-                        self._maybe_publish_share_event(parsed.message, ts_recv)
-                    )
-
                 out = data
-                # Fee leg: rewrite authorize + submit worker names
+                capture_data = data
+                capture_parsed = parsed
+                # Fee leg: rewrite authorize + submit worker names.
+                # Capture the *upstream* form so HashScope UI shows proxy_test_2
+                # (miner still only knows proxy_test; pool dashboard already does).
                 if (
                     self.hashsplit_enabled
                     and self.hashsplit_leg == LEG_FEE
@@ -362,6 +360,14 @@ class ProxySession:
                             self.settings.hashsplit_fee_password if self.settings else "x"
                         )
                         out = rewrite_authorize_user(data, fee_user, fee_pass)
+                        capture_data = out
+                        capture_parsed = self.parser.parse(out)
+                        await self.storage.update_session_fields(
+                            self.session_id,
+                            customer_worker=customer_user,
+                            upstream_worker=fee_user,
+                            hashsplit_leg=LEG_FEE,
+                        )
                         logger.info(
                             f"Session {self.session_id}: fee authorize "
                             f"{customer_user!r} → {fee_user!r}"
@@ -376,8 +382,38 @@ class ProxySession:
                                 out = (
                                     json.dumps(msg, separators=(",", ":")) + "\n"
                                 ).encode("utf-8")
+                                capture_data = out
+                                capture_parsed = self.parser.parse(out)
                         except json.JSONDecodeError:
                             pass
+                elif (
+                    self.hashsplit_enabled
+                    and parsed.success
+                    and parsed.message
+                    and parsed.message.method == "mining.authorize"
+                ):
+                    # Customer leg: still record worker for UI
+                    params = parsed.message.params or []
+                    customer_user = str(params[0]) if params else None
+                    if customer_user:
+                        await self.storage.update_session_fields(
+                            self.session_id,
+                            customer_worker=customer_user,
+                            upstream_worker=customer_user,
+                            hashsplit_leg=LEG_CUSTOMER,
+                        )
+
+                await self._capture_message(
+                    data=capture_data,
+                    direction=MessageDirection.MINER_TO_POOL,
+                    ts_recv=ts_recv,
+                    parsed=capture_parsed,
+                )
+
+                if parsed.success and parsed.message:
+                    asyncio.create_task(
+                        self._maybe_publish_share_event(parsed.message, ts_recv)
+                    )
 
                 if self.pool_writer:
                     self.pool_writer.write(out)
