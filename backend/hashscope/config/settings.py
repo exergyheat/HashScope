@@ -29,13 +29,14 @@ class Settings(BaseSettings):
     #   leg B = fee (authorize as hashsplit_fee_user)
     # Jobs are forwarded only from the active leg; active leg switches on a timer
     # so a single long-lived miner can exercise both workers (e.g. 50/50 lab test).
+    # NOTE: connection-level coin-flip was an unsolicited pivot — product path is dual-upstream.
     hashsplit_enabled: bool = False
     hashsplit_fee_percent: float = 50.0  # target % of time on fee leg
     hashsplit_fee_user: Optional[str] = None  # full worker name for fee leg
     hashsplit_fee_password: str = "x"
     hashsplit_fee_pool_host: Optional[str] = None  # default: same as pool_host
     hashsplit_fee_pool_port: Optional[int] = None  # default: same as pool_port
-    hashsplit_switch_seconds: float = 30.0  # slice length; 50/50 → equal slices each leg
+    hashsplit_switch_seconds: float = 30.0  # base slice seconds; 50/50 → equal 30s each leg
 
     # API settings
     api_host: str = "0.0.0.0"
