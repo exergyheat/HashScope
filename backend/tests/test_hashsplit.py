@@ -76,3 +76,11 @@ def test_namespace_roundtrip():
     msg = json.loads(out2)
     assert msg["params"][0] == "fee.worker"
     assert msg["params"][1] == "job1"
+
+    submit_c = b'{"id":10,"method":"mining.submit","params":["w","c.job2","e2","t","n"]}\n'
+    out3 = rewrite_submit_for_leg(
+        submit_c, "customer", "fee.worker", customer_user="cust.worker"
+    )
+    msg3 = json.loads(out3)
+    assert msg3["params"][0] == "cust.worker"
+    assert msg3["params"][1] == "job2"

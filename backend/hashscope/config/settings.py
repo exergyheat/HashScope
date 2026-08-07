@@ -25,13 +25,14 @@ class Settings(BaseSettings):
 
     # Hashsplit (Exergy): dual-upstream weighted time-slice on the same or different pools.
     # When enabled, each miner session opens two upstream connections:
-    #   leg A = customer (pass-through authorize)
-    #   leg B = fee (authorize as hashsplit_fee_user)
+    #   leg A = customer (authorize as hashsplit_customer_user, or pass-through if unset)
+    #   leg B = fee (authorize as hashsplit_fee_user, or derived)
     # Jobs are forwarded only from the active leg; active leg switches on a timer
     # so a single long-lived miner can exercise both workers (e.g. 50/50 lab test).
-    # NOTE: connection-level coin-flip was an unsolicited pivot — product path is dual-upstream.
     hashsplit_enabled: bool = False
     hashsplit_fee_percent: float = 50.0  # target % of time on fee leg
+    hashsplit_customer_user: Optional[str] = None  # full worker for customer leg (else miner user)
+    hashsplit_customer_password: str = "x"
     hashsplit_fee_user: Optional[str] = None  # full worker name for fee leg
     hashsplit_fee_password: str = "x"
     hashsplit_fee_pool_host: Optional[str] = None  # default: same as pool_host

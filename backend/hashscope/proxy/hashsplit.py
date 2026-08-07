@@ -115,7 +115,12 @@ def rewrite_notify_job_id(line: bytes, leg: str) -> bytes:
     return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def rewrite_submit_for_leg(line: bytes, leg: str, fee_user: Optional[str]) -> bytes:
+def rewrite_submit_for_leg(
+    line: bytes,
+    leg: str,
+    fee_user: Optional[str],
+    customer_user: Optional[str] = None,
+) -> bytes:
     """
     Strip namespaced job_id back to pool raw id and set worker for the leg.
     """
@@ -135,6 +140,8 @@ def rewrite_submit_for_leg(line: bytes, leg: str, fee_user: Optional[str]) -> by
     params[1] = raw_job
     if use_leg == "fee" and fee_user:
         params[0] = fee_user
+    elif use_leg == "customer" and customer_user:
+        params[0] = customer_user
     msg["params"] = params
     return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
 

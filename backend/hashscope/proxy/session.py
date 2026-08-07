@@ -432,16 +432,25 @@ class ProxySession:
 
         if method == "mining.authorize":
             params = (msg or {}).get("params") or []
-            if isinstance(params, list) and params:
-                self._customer_user = str(params[0])
+            miner_user = str(params[0]) if isinstance(params, list) and params else "worker"
+            # Upstream workers may both be rewritten (lab: proxy_test_A / proxy_test_B)
+            if self.settings and self.settings.hashsplit_customer_user:
+                self._customer_user = self.settings.hashsplit_customer_user
+            else:
+                self._customer_user = miner_user
             explicit = self.settings.hashsplit_fee_user if self.settings else None
-            self._fee_user = derive_fee_user(self._customer_user or "worker", explicit)
+            self._fee_user = derive_fee_user(miner_user, explicit)
+            cust_pass = (
+                self.settings.hashsplit_customer_password if self.settings else "x"
+            )
             fee_pass = self.settings.hashsplit_fee_password if self.settings else "x"
+            customer_line = rewrite_authorize_user(data, self._customer_user, cust_pass)
             fee_line = rewrite_authorize_user(data, self._fee_user, fee_pass)
-            await self._write_to_leg(LEG_CUSTOMER, data)
+            await self._write_to_leg(LEG_CUSTOMER, customer_line)
             await self._write_to_leg(LEG_FEE, fee_line)
             await self.storage.update_session_fields(
                 self.session_id,
+                miner_worker=miner_user,
                 customer_worker=self._customer_user,
                 fee_worker=self._fee_user,
                 upstream_worker=(
@@ -451,7 +460,7 @@ class ProxySession:
             )
             logger.info(
                 f"Session {self.session_id}: hashsplit authorize "
-                f"customer={self._customer_user!r} fee={self._fee_user!r}"
+                f"miner={miner_user!r} → customer={self._customer_user!r} fee={self._fee_user!r}"
             )
             return
 
@@ -461,7 +470,9 @@ class ProxySession:
             leg = leg_from_job or (
                 self._job_leg.get(job_id, self.active_leg) if job_id else self.active_leg
             )
-            out = rewrite_submit_for_leg(data, leg, self._fee_user)
+            out = rewrite_submit_for_leg(
+                data, leg, self._fee_user, customer_user=self._customer_user
+            )
             await self._write_to_leg(leg, out)
             logger.info(
                 f"Session {self.session_id}: submit namespaced_job={job_id} → leg={leg}"
