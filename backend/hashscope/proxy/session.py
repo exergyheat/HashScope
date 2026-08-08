@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import random
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -25,14 +26,24 @@ from ..nostr.constants import (
 from ..config.settings import Settings
 from .hashsplit import (
     build_worker_bands,
+    denamespace_job_id,
     derive_fee_user,
+    extract_notify_job_id,
+    extract_submit_job_id,
+    extract_subscribe_extranonce,
     pick_worker_for_rnd,
     rewrite_authorize_user,
-    rewrite_submit_worker,
-    share_rnd_from_submit,
+    rewrite_notify_job_id,
+    rewrite_submit_for_leg,
+    build_set_difficulty,
+    build_set_extranonce,
 )
 
 logger = logging.getLogger(__name__)
+
+# Hashsplit leg labels
+LEG_CUSTOMER = "customer"
+LEG_FEE = "fee"
 
 
 class ProxySession:
@@ -76,19 +87,44 @@ class ProxySession:
         peer_info = miner_writer.get_extra_info('peername')
         self.miner_peer = f"{peer_info[0]}:{peer_info[1]}" if peer_info else "unknown"
 
-        # Pool connection (customer / single-pool path)
+        # Pool connection (customer leg)
         self.pool_reader: Optional[asyncio.StreamReader] = None
         self.pool_writer: Optional[asyncio.StreamWriter] = None
         self.pool_peer: Optional[str] = None
 
-        # Same-pool share-band hashsplit (DATUM-style per-share worker pick)
+        # Fee leg (hashsplit)
+        self.fee_reader: Optional[asyncio.StreamReader] = None
+        self.fee_writer: Optional[asyncio.StreamWriter] = None
+        self.fee_peer: Optional[str] = None
+        self.fee_pool_host: Optional[str] = None
+        self.fee_pool_port: Optional[int] = None
+
+        # Job-band hashsplit: two real authorized upstream connections; which
+        # one's mining.notify feeds the miner is re-rolled on every notify
+        # using weighted bands (DATUM-style math, applied at job hand-off
+        # instead of per-share, since a share is only valid against the
+        # extranonce1 of the connection it was mined against).
         self.hashsplit_enabled = bool(settings and settings.hashsplit_enabled)
+        self.active_leg: str = LEG_CUSTOMER
+        self._leg_bands: list[tuple[str, int]] = []
+        self._job_leg: dict[str, str] = {}
+        self._seen_response_ids: set[Any] = set()
+        # Which miner-issued request id maps to which method, so pool
+        # responses fanned out to both legs can be resolved correctly
+        # (subscribe/authorize responses are per-connection and only the
+        # customer leg's is meaningful to the miner; see
+        # _hashsplit_handle_pool_line).
+        self._pending_request_method: dict[Any, str] = {}
+        self._extranonce: dict[str, tuple[Optional[str], Optional[int]]] = {
+            LEG_CUSTOMER: (None, None),
+            LEG_FEE: (None, None),
+        }
+        self._difficulty: dict[str, Optional[float]] = {
+            LEG_CUSTOMER: None,
+            LEG_FEE: None,
+        }
         self._customer_user: Optional[str] = None
         self._fee_user: Optional[str] = None
-        self._worker_bands: list[tuple[str, int]] = []
-        self._authorized_workers: set[str] = set()
-        self._internal_auth_ids: set[Any] = set()
-        self._fee_password: str = "x"
 
         self._message_counter = 0
         self._running = False
@@ -103,6 +139,7 @@ class ProxySession:
             f"Session {self.session_id} created for miner {self.miner_peer}"
             f"{' [hashsplit ON]' if self.hashsplit_enabled else ''}"
         )
+
     async def replay_message(self, message_data: str) -> tuple[Optional[dict], float]:
         """
         Replay a message through the existing pool connection for debugging.
@@ -233,6 +270,7 @@ class ProxySession:
 
     async def start(self) -> None:
         """Start the proxy session."""
+        # Register session with storage (before pool connection attempt)
         await self.storage.register_session(
             session_id=self.session_id,
             peer=self.miner_peer,
@@ -243,10 +281,12 @@ class ProxySession:
             await self.storage.update_session_fields(
                 self.session_id,
                 hashsplit_enabled=True,
-                hashsplit_mode="share_band",
+                hashsplit_mode="job_band",
+                hashsplit_leg=self.active_leg,
             )
 
         try:
+            # Connect to customer / primary upstream
             self.pool_reader, self.pool_writer = await asyncio.open_connection(
                 self.pool_host, self.pool_port
             )
@@ -254,6 +294,7 @@ class ProxySession:
             peer_info = self.pool_writer.get_extra_info('peername')
             self.pool_peer = f"{peer_info[0]}:{peer_info[1]}" if peer_info else "unknown"
 
+            # Update pool connection status
             await self.storage.update_session_pool_status(
                 session_id=self.session_id,
                 connected=True,
@@ -261,20 +302,42 @@ class ProxySession:
             )
 
             logger.info(
-                f"Session {self.session_id}: Connected to pool "
-                f"{self.pool_host}:{self.pool_port}"
-                f"{' [share-band hashsplit]' if self.hashsplit_enabled else ''}"
+                f"Session {self.session_id}: Connected to pool {self.pool_host}:{self.pool_port}"
             )
 
+            if self.hashsplit_enabled and self.settings:
+                self.fee_pool_host = self.settings.get_fee_pool_hostname()
+                self.fee_pool_port = self.settings.get_fee_pool_port()
+                self.fee_reader, self.fee_writer = await asyncio.open_connection(
+                    self.fee_pool_host, self.fee_pool_port
+                )
+                fee_peer = self.fee_writer.get_extra_info('peername')
+                self.fee_peer = f"{fee_peer[0]}:{fee_peer[1]}" if fee_peer else "unknown"
+                self.active_leg = LEG_CUSTOMER
+                fee_pct = max(0.0, min(100.0, float(self.settings.hashsplit_fee_percent)))
+                self._leg_bands = build_worker_bands(
+                    [(LEG_CUSTOMER, 100.0 - fee_pct), (LEG_FEE, fee_pct)]
+                )
+                logger.info(
+                    f"Session {self.session_id}: Hashsplit fee leg connected "
+                    f"{self.fee_pool_host}:{self.fee_pool_port} peer={self.fee_peer} "
+                    f"fee_pct={fee_pct} mode=job-band (re-rolled per mining.notify)"
+                )
+
             self._running = True
-            await asyncio.gather(
+
+            tasks = [
                 self._relay_miner_to_pool(),
-                self._relay_pool_to_miner(),
-                return_exceptions=True,
-            )
+                self._relay_pool_to_miner(LEG_CUSTOMER),
+            ]
+            if self.hashsplit_enabled:
+                tasks.append(self._relay_pool_to_miner(LEG_FEE))
+
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
             logger.error(f"Session {self.session_id} error: {e}", exc_info=True)
+            # Update pool connection status to failed
             await self.storage.update_session_pool_status(
                 session_id=self.session_id,
                 connected=False,
@@ -282,143 +345,78 @@ class ProxySession:
         finally:
             await self._cleanup()
 
-    async def _ensure_pool_authorize(self, worker: str, password: str) -> None:
-        """Send mining.authorize for a worker if we haven't yet on this upstream.
+    def _writer_for_leg(self, leg: str) -> Optional[asyncio.StreamWriter]:
+        if leg == LEG_FEE:
+            return self.fee_writer
+        return self.pool_writer
 
-        Uses high synthetic ids so responses can be dropped before they hit the miner.
+    def _reader_for_leg(self, leg: str) -> Optional[asyncio.StreamReader]:
+        if leg == LEG_FEE:
+            return self.fee_reader
+        return self.pool_reader
+
+    def _peer_for_leg(self, leg: str) -> str:
+        if leg == LEG_FEE:
+            return self.fee_peer or "fee-pool"
+        return self.pool_peer or "pool"
+
+    async def _write_to_leg(self, leg: str, data: bytes) -> None:
+        writer = self._writer_for_leg(leg)
+        if writer:
+            writer.write(data)
+            await writer.drain()
+
+    def _roll_leg(self) -> str:
+        """Weighted random pick of which leg should feed the next job.
+
+        Re-rolled on every upstream mining.notify (see
+        _hashsplit_handle_pool_line) rather than on a wall-clock timer, so
+        convergence to the configured fee_pct is statistical (like DATUM's
+        per-share draw) instead of clock-driven.
         """
-        if worker in self._authorized_workers or not self.pool_writer:
-            return
-        auth_id = 900000 + len(self._authorized_workers)
-        msg = {
-            "id": auth_id,
-            "method": "mining.authorize",
-            "params": [worker, password],
-        }
-        line = (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
-        self.pool_writer.write(line)
-        await self.pool_writer.drain()
-        self._authorized_workers.add(worker)
-        self._internal_auth_ids.add(auth_id)
-        logger.info(f"Session {self.session_id}: pool authorize {worker!r} id={auth_id}")
+        if not self._leg_bands:
+            return LEG_CUSTOMER
+        rnd = random.getrandbits(16)
+        return pick_worker_for_rnd(rnd, self._leg_bands) or LEG_CUSTOMER
 
     async def _relay_miner_to_pool(self) -> None:
-        """Relay messages from miner to pool."""
+        """Relay messages from miner to pool (single or dual-upstream hashsplit)."""
         try:
             while self._running:
+                # Read until newline (Stratum messages are newline-delimited)
                 data = await self.miner_reader.readuntil(b'\n')
 
                 if not data:
                     break
 
                 ts_recv = datetime.utcnow()
+
+                # Parse the message
                 parsed = self.parser.parse(data)
 
-                out = data
-                capture_data = data
-                capture_parsed = parsed
-
-                if (
-                    self.hashsplit_enabled
-                    and self.settings
-                    and parsed.success
-                    and parsed.message
-                ):
-                    method = parsed.message.method
-                    if method == "mining.authorize":
-                        params = parsed.message.params or []
-                        miner_user = str(params[0]) if params else "worker"
-                        self._customer_user = (
-                            self.settings.hashsplit_customer_user or miner_user
-                        )
-                        self._fee_user = derive_fee_user(
-                            self._customer_user, self.settings.hashsplit_fee_user
-                        )
-                        fee_pct = max(
-                            0.0,
-                            min(100.0, float(self.settings.hashsplit_fee_percent)),
-                        )
-                        self._worker_bands = build_worker_bands(
-                            [
-                                (self._customer_user, 100.0 - fee_pct),
-                                (self._fee_user, fee_pct),
-                            ]
-                        )
-                        cust_pass = self.settings.hashsplit_customer_password
-                        fee_pass = self.settings.hashsplit_fee_password
-                        self._fee_password = fee_pass
-                        # One authorize only (customer). Fee worker is authorized
-                        # lazily on first fee-band share — dual authorize at
-                        # handshake was closing 256foundation sessions.
-                        out = rewrite_authorize_user(
-                            data, self._customer_user, cust_pass
-                        )
-                        self._authorized_workers.add(self._customer_user)
-                        capture_data = out
-                        capture_parsed = self.parser.parse(out)
-                        await self.storage.update_session_fields(
-                            self.session_id,
-                            hashsplit_mode="share_band",
-                            miner_worker=miner_user,
-                            customer_worker=self._customer_user,
-                            fee_worker=self._fee_user,
-                            upstream_worker=self._customer_user,
-                        )
-                        logger.info(
-                            f"Session {self.session_id}: share-band authorize "
-                            f"miner={miner_user!r} bands={self._worker_bands!r}"
-                        )
-                    elif method == "mining.submit" and self._worker_bands:
-                        try:
-                            msg = json.loads(
-                                data.decode("utf-8", errors="replace").strip()
-                            )
-                            params = list(msg.get("params") or [])
-                            # Strip legacy dual-upstream job-id prefixes if miner still has them
-                            if len(params) > 1 and isinstance(params[1], str):
-                                jid = params[1]
-                                if jid.startswith("c.") or jid.startswith("f."):
-                                    params[1] = jid[2:]
-                                    msg["params"] = params
-                                    data = (
-                                        json.dumps(msg, separators=(",", ":")) + "\n"
-                                    ).encode("utf-8")
-                            rnd = share_rnd_from_submit(params)
-                            worker = pick_worker_for_rnd(rnd, self._worker_bands)
-                            if worker:
-                                # Rewrite worker only — no second mining.authorize.
-                                # Dual-auth on one socket was closing 256foundation sessions.
-                                out = rewrite_submit_worker(data, worker)
-                                capture_data = out
-                                capture_parsed = self.parser.parse(out)
-                                await self.storage.update_session_fields(
-                                    self.session_id,
-                                    upstream_worker=worker,
-                                    last_share_rnd=rnd,
-                                )
-                                logger.debug(
-                                    f"Session {self.session_id}: share-band submit "
-                                    f"rnd={rnd} → {worker!r}"
-                                )
-                        except json.JSONDecodeError:
-                            pass
-
+                # Capture the message
                 await self._capture_message(
-                    data=capture_data,
+                    data=data,
                     direction=MessageDirection.MINER_TO_POOL,
                     ts_recv=ts_recv,
-                    parsed=capture_parsed,
+                    parsed=parsed,
                 )
 
+                # Publish ShareEvent to Nostr if enabled (Iteration 2)
                 if parsed.success and parsed.message:
                     asyncio.create_task(
                         self._maybe_publish_share_event(parsed.message, ts_recv)
                     )
 
-                if self.pool_writer:
-                    self.pool_writer.write(out)
-                    await self.pool_writer.drain()
+                if self.hashsplit_enabled:
+                    await self._hashsplit_forward_miner_line(data, parsed)
+                else:
+                    # Forward to pool (byte-for-byte relay)
+                    if self.pool_writer:
+                        self.pool_writer.write(data)
+                        await self.pool_writer.drain()
 
+                # Auto-replay if enabled (load testing) — single-pool only
                 if (
                     not self.hashsplit_enabled
                     and parsed.success
@@ -436,24 +434,105 @@ class ProxySession:
         finally:
             self._running = False
 
-    async def _relay_pool_to_miner(self) -> None:
-        """Relay messages from pool to miner."""
+    async def _hashsplit_forward_miner_line(self, data: bytes, parsed) -> None:
+        """Route a miner→pool line across dual upstreams."""
+        msg: Optional[dict] = None
+        if parsed.success and parsed.message:
+            if hasattr(parsed.message, "model_dump"):
+                msg = parsed.message.model_dump(exclude_none=True)
+            else:
+                try:
+                    msg = json.loads(data.decode("utf-8", errors="replace").strip())
+                except json.JSONDecodeError:
+                    msg = None
+        else:
+            try:
+                msg = json.loads(data.decode("utf-8", errors="replace").strip())
+            except json.JSONDecodeError:
+                msg = None
+
+        method = (msg or {}).get("method")
+
+        # Handshake-ish: fan out to both legs
+        if method in ("mining.subscribe", "mining.configure", "mining.extranonce.subscribe"):
+            req_id = (msg or {}).get("id")
+            if req_id is not None:
+                self._pending_request_method[req_id] = method
+            await self._write_to_leg(LEG_CUSTOMER, data)
+            await self._write_to_leg(LEG_FEE, data)
+            return
+
+        if method == "mining.authorize":
+            req_id = (msg or {}).get("id")
+            if req_id is not None:
+                self._pending_request_method[req_id] = method
+            params = (msg or {}).get("params") or []
+            if isinstance(params, list) and params:
+                self._customer_user = str(params[0])
+            explicit = self.settings.hashsplit_fee_user if self.settings else None
+            self._fee_user = derive_fee_user(self._customer_user or "worker", explicit)
+            cust_pass = self.settings.hashsplit_customer_password if self.settings else "x"
+            fee_pass = self.settings.hashsplit_fee_password if self.settings else "x"
+            customer_line = rewrite_authorize_user(data, self._customer_user, cust_pass)
+            fee_line = rewrite_authorize_user(data, self._fee_user, fee_pass)
+            await self._write_to_leg(LEG_CUSTOMER, customer_line)
+            await self._write_to_leg(LEG_FEE, fee_line)
+            await self.storage.update_session_fields(
+                self.session_id,
+                customer_worker=self._customer_user,
+                fee_worker=self._fee_user,
+                upstream_worker=(
+                    self._fee_user if self.active_leg == LEG_FEE else self._customer_user
+                ),
+                hashsplit_leg=self.active_leg,
+            )
+            logger.info(
+                f"Session {self.session_id}: job-band authorize "
+                f"customer={self._customer_user!r} fee={self._fee_user!r}"
+            )
+            return
+
+        if method == "mining.submit":
+            job_id = extract_submit_job_id(msg or {})
+            leg_from_job, _raw = denamespace_job_id(job_id) if job_id else (None, "")
+            leg = leg_from_job or (
+                self._job_leg.get(job_id, self.active_leg) if job_id else self.active_leg
+            )
+            out = rewrite_submit_for_leg(data, leg, self._fee_user)
+            await self._write_to_leg(leg, out)
+            logger.info(
+                f"Session {self.session_id}: submit namespaced_job={job_id} → leg={leg}"
+            )
+            return
+
+        # Default: only active leg (e.g. mining.suggest_difficulty)
+        await self._write_to_leg(self.active_leg, data)
+
+    async def _relay_pool_to_miner(self, leg: str = LEG_CUSTOMER) -> None:
+        """Relay messages from one pool leg to miner."""
+        reader = self._reader_for_leg(leg)
         try:
-            while self._running and self.pool_reader:
-                data = await self.pool_reader.readuntil(b'\n')
+            while self._running and reader:
+                # Read until newline (Stratum messages are newline-delimited)
+                data = await reader.readuntil(b'\n')
 
                 if not data:
                     break
 
                 ts_recv = datetime.utcnow()
+
+                # Parse the message
                 parsed = self.parser.parse(data)
 
+                # Check if this is a response to a replay request
                 is_replay_response = False
                 if parsed.success and parsed.message:
                     message_id = parsed.message.id
                     if message_id is not None and message_id in self._replay_futures:
+                        # This is a replay response - complete the future
                         future = self._replay_futures.pop(message_id)
                         if not future.done():
+                            # Serialize the StratumMessage to dict
                             if hasattr(parsed.message, 'model_dump'):
                                 result = parsed.message.model_dump()
                             elif hasattr(parsed.message, 'dict'):
@@ -462,38 +541,174 @@ class ProxySession:
                                 result = vars(parsed.message)
                             future.set_result(result)
                         is_replay_response = True
-                        logger.info(
-                            f"Session {self.session_id}: Intercepted replay response "
-                            f"for message ID {message_id} (not forwarding to miner)"
-                        )
-                    # Drop fee-leg authorize replies (synthetic ids)
-                    if (
-                        message_id is not None
-                        and message_id in self._internal_auth_ids
-                    ):
-                        self._internal_auth_ids.discard(message_id)
-                        is_replay_response = True
-                        logger.debug(
-                            f"Session {self.session_id}: dropped internal auth "
-                            f"response id={message_id}"
-                        )
+                        logger.info(f"Session {self.session_id}: Intercepted replay response for message ID {message_id} (not forwarding to miner)")
 
+                # Capture the message ONLY if not a replay response
+                # Replay messages are captured separately with HASHSCOPE_TO_POOL direction
                 if not is_replay_response:
+                    # Temporarily set pool_peer for capture attribution
+                    saved_peer = self.pool_peer
+                    if leg == LEG_FEE:
+                        self.pool_peer = self.fee_peer
                     await self._capture_message(
                         data=data,
                         direction=MessageDirection.POOL_TO_MINER,
                         ts_recv=ts_recv,
                         parsed=parsed,
                     )
+                    self.pool_peer = saved_peer
+
+                if is_replay_response:
+                    continue
+
+                if self.hashsplit_enabled:
+                    await self._hashsplit_handle_pool_line(leg, data, parsed)
+                else:
                     self.miner_writer.write(data)
                     await self.miner_writer.drain()
 
         except asyncio.IncompleteReadError:
-            logger.info(f"Session {self.session_id}: Pool disconnected")
+            logger.info(f"Session {self.session_id}: Pool disconnected ({leg})")
         except Exception as e:
-            logger.error(f"Session {self.session_id} pool relay error: {e}", exc_info=True)
+            logger.error(f"Session {self.session_id} pool relay error ({leg}): {e}", exc_info=True)
         finally:
             self._running = False
+
+    async def _hashsplit_handle_pool_line(self, leg: str, data: bytes, parsed) -> None:
+        """Decide whether to forward a pool line to the miner under hashsplit."""
+        msg: Optional[dict] = None
+        try:
+            if parsed.success and parsed.message and hasattr(parsed.message, "model_dump"):
+                msg = parsed.message.model_dump(exclude_none=True)
+            else:
+                msg = json.loads(data.decode("utf-8", errors="replace").strip())
+        except json.JSONDecodeError:
+            msg = None
+
+        if not msg:
+            if leg == self.active_leg:
+                self.miner_writer.write(data)
+                await self.miner_writer.drain()
+            return
+
+        method = msg.get("method")
+
+        # Track difficulty per leg
+        if method == "mining.set_difficulty":
+            params = msg.get("params") or []
+            if params:
+                try:
+                    self._difficulty[leg] = float(params[0])
+                except (TypeError, ValueError):
+                    pass
+            if leg == self.active_leg:
+                self.miner_writer.write(data)
+                await self.miner_writer.drain()
+            return
+
+        # Each new job is a re-roll point: pick which leg should be active
+        # (weighted by fee_pct) before deciding whether this particular
+        # notify gets forwarded. Namespace job ids so dual upstreams never
+        # collide inside the miner.
+        if method == "mining.notify":
+            job_id = extract_notify_job_id(msg)
+            if job_id:
+                self._job_leg[job_id] = leg
+                if len(self._job_leg) > 5000:
+                    for k in list(self._job_leg.keys())[:1000]:
+                        self._job_leg.pop(k, None)
+
+            chosen = self._roll_leg()
+            if chosen != self.active_leg:
+                await self._switch_active_leg(chosen)
+
+            if leg == self.active_leg:
+                out = rewrite_notify_job_id(data, leg)
+                self.miner_writer.write(out)
+                await self.miner_writer.drain()
+            return
+
+        # JSON-RPC responses (subscribe/authorize/submit results)
+        if "id" in msg and msg.get("id") is not None and method is None:
+            req_id = msg["id"]
+            # Capture extranonce from subscribe results (both legs, even the
+            # one we don't forward — needed later on leg switch).
+            if "result" in msg and msg.get("result") is not None:
+                en1, en2 = extract_subscribe_extranonce(msg.get("result"))
+                if en1 is not None:
+                    self._extranonce[leg] = (en1, en2)
+
+            orig_method = self._pending_request_method.get(req_id)
+            if orig_method in ("mining.subscribe", "mining.authorize"):
+                # Per-connection responses (extranonce, credential check): the
+                # fee leg's own handshake is internal bookkeeping the miner
+                # never asked about. Forwarding whichever leg answers first
+                # would hand the miner the wrong extranonce (subscribe) or a
+                # spurious rejection (authorize) roughly half the time.
+                if leg != LEG_CUSTOMER:
+                    if orig_method == "mining.authorize" and not msg.get("result"):
+                        logger.warning(
+                            f"Session {self.session_id}: fee-leg authorize failed: {msg}"
+                        )
+                    return
+                if req_id in self._seen_response_ids:
+                    return
+                self._seen_response_ids.add(req_id)
+                self._pending_request_method.pop(req_id, None)
+                self.miner_writer.write(data)
+                await self.miner_writer.drain()
+                return
+
+            # Other responses (e.g. submit results): first arrival wins.
+            if req_id in self._seen_response_ids:
+                return
+
+            self._seen_response_ids.add(req_id)
+            self.miner_writer.write(data)
+            await self.miner_writer.drain()
+            return
+
+        # Other notifications: only active leg
+        if leg == self.active_leg:
+            self.miner_writer.write(data)
+            await self.miner_writer.drain()
+
+    async def _switch_active_leg(self, leg: str) -> None:
+        """Switch which upstream feeds jobs to the miner."""
+        if leg == self.active_leg:
+            return
+        prev = self.active_leg
+        prev_en1, prev_en2 = self._extranonce.get(prev, (None, None))
+        self.active_leg = leg
+        en1, en2 = self._extranonce.get(leg, (None, None))
+        diff = self._difficulty.get(leg)
+        upstream = (
+            self._fee_user
+            if leg == LEG_FEE
+            else self._customer_user
+        )
+
+        logger.debug(
+            f"Session {self.session_id}: job-band switch {prev} → {leg} "
+            f"extranonce1={en1} en2_size={en2} diff={diff}"
+        )
+        await self.storage.update_session_fields(
+            self.session_id,
+            hashsplit_leg=leg,
+            upstream_worker=upstream,
+        )
+
+        try:
+            # Only push set_extranonce when the extranonce actually changes —
+            # unnecessary flips were hard on cgminer during the earlier spike.
+            if en1 is not None and en2 is not None and (en1, en2) != (prev_en1, prev_en2):
+                self.miner_writer.write(build_set_extranonce(en1, en2))
+                await self.miner_writer.drain()
+            if diff is not None:
+                self.miner_writer.write(build_set_difficulty(diff))
+                await self.miner_writer.drain()
+        except Exception as e:
+            logger.error(f"Session {self.session_id}: failed to signal leg switch: {e}")
 
     async def _capture_message(
         self,
@@ -658,7 +873,6 @@ class ProxySession:
             )
 
             # Replay the message N times with random delays
-            import random
             for i in range(replay_count):
                 # Random delay between 1-5ms for high load testing
                 delay = random.uniform(0.001, 0.005)
@@ -703,7 +917,7 @@ class ProxySession:
             pool_peer=None,
         )
 
-        # Close the pool connection
+        # Close the pool connection(s)
         if self.pool_writer:
             try:
                 self.pool_writer.close()
@@ -711,6 +925,14 @@ class ProxySession:
                 logger.info(f"Session {self.session_id}: Pool connection closed")
             except Exception as e:
                 logger.error(f"Error force-closing pool connection: {e}")
+
+        if self.fee_writer:
+            try:
+                self.fee_writer.close()
+                await self.fee_writer.wait_closed()
+                logger.info(f"Session {self.session_id}: Fee pool connection closed")
+            except Exception as e:
+                logger.error(f"Error force-closing fee pool connection: {e}")
 
         # Close the miner connection to force full reconnect
         if self.miner_writer:
@@ -724,6 +946,8 @@ class ProxySession:
         # Set to None to ensure they're not used again
         self.pool_writer = None
         self.pool_reader = None
+        self.fee_writer = None
+        self.fee_reader = None
         self.miner_writer = None
         self.miner_reader = None
 
@@ -750,3 +974,9 @@ class ProxySession:
             except Exception as e:
                 logger.error(f"Error closing pool connection: {e}")
 
+        if self.fee_writer:
+            try:
+                self.fee_writer.close()
+                await self.fee_writer.wait_closed()
+            except Exception as e:
+                logger.error(f"Error closing fee pool connection: {e}")

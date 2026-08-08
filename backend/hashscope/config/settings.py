@@ -23,20 +23,24 @@ class Settings(BaseSettings):
     pool_host: str
     pool_port: int = 3333
 
-    # Hashsplit (Exergy): same-pool share-band worker routing (DATUM-style).
-    # One upstream socket; each mining.submit is credited to customer or fee worker
-    # by mapping a 16-bit hash of share fields onto weight bands (e.g. 50/50 lab).
-    # Multi-pool (different upstreams) is not handled here — reintroduce dual-upstream later.
+    # Hashsplit (Exergy): job-band routing (DATUM-style weighting, applied to
+    # job selection instead of per-share worker rewriting). Two real,
+    # separately-authorized upstream connections (customer + fee leg); which
+    # one's mining.notify feeds the miner is re-rolled on every notify using
+    # weighted 16-bit bands. A share is only valid against the extranonce1 of
+    # the connection it was mined against, so this can't be done per-share on
+    # one socket — see git history (share_band mode) for why that failed.
     hashsplit_enabled: bool = False
-    hashsplit_fee_percent: float = 50.0  # target % of shares on fee worker
+    hashsplit_fee_percent: float = 50.0  # target % of job time on fee leg
     hashsplit_customer_user: Optional[str] = None  # full worker (else miner user)
     hashsplit_customer_password: str = "x"
-    hashsplit_fee_user: Optional[str] = None  # full worker for fee band (or derived)
+    hashsplit_fee_user: Optional[str] = None  # full worker for fee leg (or derived)
     hashsplit_fee_password: str = "x"
-    # Kept for env compatibility; unused in share-band mode (single pool).
+    # Fee leg upstream; defaults to the same pool as the customer leg (lab:
+    # both legs point at 256foundation, just authorized as separate workers).
     hashsplit_fee_pool_host: Optional[str] = None
     hashsplit_fee_pool_port: Optional[int] = None
-    hashsplit_switch_seconds: float = 30.0  # unused in share-band mode
+    hashsplit_switch_seconds: float = 30.0  # unused in job-band mode (re-rolled per notify, not on a timer)
 
     # API settings
     api_host: str = "0.0.0.0"
