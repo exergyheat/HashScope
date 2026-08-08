@@ -467,10 +467,11 @@ class ProxySession:
             if req_id is not None:
                 self._pending_request_method[req_id] = method
             params = (msg or {}).get("params") or []
-            if isinstance(params, list) and params:
-                self._customer_user = str(params[0])
-            explicit = self.settings.hashsplit_fee_user if self.settings else None
-            self._fee_user = derive_fee_user(self._customer_user or "worker", explicit)
+            miner_user = str(params[0]) if params else "worker"
+            configured_customer = self.settings.hashsplit_customer_user if self.settings else None
+            self._customer_user = configured_customer or miner_user
+            explicit_fee = self.settings.hashsplit_fee_user if self.settings else None
+            self._fee_user = derive_fee_user(self._customer_user, explicit_fee)
             cust_pass = self.settings.hashsplit_customer_password if self.settings else "x"
             fee_pass = self.settings.hashsplit_fee_password if self.settings else "x"
             customer_line = rewrite_authorize_user(data, self._customer_user, cust_pass)
