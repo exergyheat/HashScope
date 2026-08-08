@@ -89,9 +89,6 @@ class ProxySession:
         self._authorized_workers: set[str] = set()
         self._internal_auth_ids: set[Any] = set()
         self._fee_password: str = "x"
-        # Miner authorize JSON-RPC id; once pool accepts it we side-channel auth fee worker.
-        self._pending_customer_auth_id: Optional[Any] = None
-        self._fee_auth_scheduled: bool = False
 
         self._message_counter = 0
         self._running = False
@@ -350,14 +347,13 @@ class ProxySession:
                         cust_pass = self.settings.hashsplit_customer_password
                         fee_pass = self.settings.hashsplit_fee_password
                         self._fee_password = fee_pass
-                        # Authorize customer with miner's id first. Fee worker is
-                        # authorized only after pool accepts that (see pool relay).
-                        # Simultaneous dual-auth at handshake closed 256foundation.
+                        # One authorize only (customer). Fee worker is authorized
+                        # lazily on first fee-band share — dual authorize at
+                        # handshake was closing 256foundation sessions.
                         out = rewrite_authorize_user(
                             data, self._customer_user, cust_pass
                         )
                         self._authorized_workers.add(self._customer_user)
-                        self._pending_customer_auth_id = parsed.message.id
                         capture_data = out
                         capture_parsed = self.parser.parse(out)
                         await self.storage.update_session_fields(
@@ -390,28 +386,19 @@ class ProxySession:
                             rnd = share_rnd_from_submit(params)
                             worker = pick_worker_for_rnd(rnd, self._worker_bands)
                             if worker:
+                                # Rewrite worker only — no second mining.authorize.
+                                # Dual-auth on one socket was closing 256foundation sessions.
                                 out = rewrite_submit_worker(data, worker)
                                 capture_data = out
                                 capture_parsed = self.parser.parse(out)
-                                is_fee = worker == self._fee_user
-                                if is_fee:
-                                    self._band_shares_fee = (
-                                        getattr(self, "_band_shares_fee", 0) + 1
-                                    )
-                                else:
-                                    self._band_shares_customer = (
-                                        getattr(self, "_band_shares_customer", 0) + 1
-                                    )
                                 await self.storage.update_session_fields(
                                     self.session_id,
                                     upstream_worker=worker,
                                     last_share_rnd=rnd,
-                                    band_shares_customer=getattr(
-                                        self, "_band_shares_customer", 0
-                                    ),
-                                    band_shares_fee=getattr(
-                                        self, "_band_shares_fee", 0
-                                    ),
+                                )
+                                logger.debug(
+                                    f"Session {self.session_id}: share-band submit "
+                                    f"rnd={rnd} → {worker!r}"
                                 )
                         except json.JSONDecodeError:
                             pass
@@ -490,35 +477,6 @@ class ProxySession:
                             f"Session {self.session_id}: dropped internal auth "
                             f"response id={message_id}"
                         )
-
-                    # After customer authorize succeeds, authorize fee worker so the
-                    # pool will attribute remapped B submits to proxy_test_B.
-                    if (
-                        self.hashsplit_enabled
-                        and self._pending_customer_auth_id is not None
-                        and message_id == self._pending_customer_auth_id
-                        and not self._fee_auth_scheduled
-                    ):
-                        self._pending_customer_auth_id = None
-                        ok = (
-                            parsed.message.error is None
-                            and parsed.message.result is not False
-                        )
-                        if (
-                            ok
-                            and self._fee_user
-                            and self._fee_user not in self._authorized_workers
-                        ):
-                            self._fee_auth_scheduled = True
-                            try:
-                                await self._ensure_pool_authorize(
-                                    self._fee_user, self._fee_password
-                                )
-                            except Exception as e:
-                                logger.error(
-                                    f"Session {self.session_id}: fee authorize "
-                                    f"failed: {e}"
-                                )
 
                 if not is_replay_response:
                     await self._capture_message(
